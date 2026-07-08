@@ -28,12 +28,12 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 |-------|---------|
 | `playwright-cdp` | Chrome CDP browser automation via Playwright |
 | `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script |
-| `reviewing-skills` | Systematic skill quality evaluation framework |
+| `skill-reviewer` | Systematic skill quality evaluation framework |
 | `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
 
 ## Conventions
 
-- SKILL.md frontmatter: `name` (gerund/verb-first, e.g. `reviewing-skills`) and `description` (starts with "Use when")
+- SKILL.md frontmatter: `name` (gerund/verb-first, e.g. `skill-maker`) and `description` (starts with "Use when")
 - SKILL.md is the single source of truth; reference/template files are supplementary
 - Content is bilingual (Chinese + English) — preserve both when editing
 - playwright-cdp scripts run with `NODE_PATH=$(npm root -g) npx tsx script.ts` (Playwright is a global install, not local)
@@ -41,7 +41,7 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 
 ## When Editing Skills
 
-- Follow the reviewing-skills evaluation dimensions (discoverability, executability, correctness, etc.)
+- Follow the skill-reviewer evaluation dimensions (discoverability, executability, correctness, etc.)
 - Keep SKILL.md under 500 lines; move detail to `reference/`
 - Code snippets must be copy-paste-runnable, no `...` or `TODO` placeholders
 - Test Playwright scripts against CDP at `127.0.0.1:18800` — never use `chromium.launch()`

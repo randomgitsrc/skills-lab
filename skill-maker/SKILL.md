@@ -11,7 +11,7 @@ Create, test, and iterate on agent skills. One continuous loop: draft → test �
 
 **Use:** creating a skill from scratch, improving an existing skill, testing skill quality, optimizing description triggering, benchmarking skill vs baseline.
 
-**Not use:** reviewing skill quality without modifying it (→ reviewing-skills), debugging a specific skill failure (→ systematic-debugging), writing application code.
+**Not use:** reviewing skill quality without modifying it (→ skill-reviewer), debugging a specific skill failure (→ systematic-debugging), writing application code.
 
 ## Core Loop
 

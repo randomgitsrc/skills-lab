@@ -1,9 +1,9 @@
 ---
-name: reviewing-skills
+name: skill-reviewer
 description: "Use when evaluating, auditing, or reviewing an existing skill for quality, completeness, and effectiveness — before deployment or after major edits."
 ---
 
-# Reviewing Skills
+# Skill Reviewer
 
 Systematic evaluation of agent skill quality. One pass, concrete findings, no hand-waving.
 
@@ -39,7 +39,7 @@ Agent 能否在正确时机找到并加载这个 skill？
 | description < 500 字符 | 超长则被截断或被当作快捷指令 |
 | description 包含具体症状/场景 | 错误信息、工具名、技术关键词 |
 | description 第三人称 | 不用 "I can" / "You can" |
-| name 用 gerund 或 verb-first | `reviewing-skills` 不是 `skill-review` |
+| name 用 noun-agent 模式 | `skill-reviewer` 不是 `skill-review` |
 | name 只含字母数字连字符 | 无括号/特殊字符 |
 
 **常见失败：** description 写了流程摘要 → agent 只读 description 不读 SKILL.md，行为走样。

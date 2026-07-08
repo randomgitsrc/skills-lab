@@ -164,13 +164,23 @@ For description optimization:
 │   └── eval-0/
 │       ├── eval_metadata.json
 │       ├── with_skill/
-│       │   ├── timing.json
-│       │   ├── grading.json
-│       │   └── outputs/
+│       │   ├── run-1/            # Each run gets its own directory
+│       │   │   ├── timing.json
+│       │   │   ├── grading.json
+│       │   │   └── outputs/
+│       │   └── run-2/
+│       │       ├── timing.json
+│       │       ├── grading.json
+│       │       └── outputs/
 │       └── without_skill/
-│           ├── timing.json
-│           ├── grading.json
-│           └── outputs/
+│           ├── run-1/
+│           │   ├── timing.json
+│           │   ├── grading.json
+│           │   └── outputs/
+│           └── run-2/
+│               ├── timing.json
+│               ├── grading.json
+│               └── outputs/
 └── iteration-2/
     └── ...
 ```

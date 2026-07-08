@@ -80,20 +80,7 @@ description: Use when [specific triggering conditions and symptoms]. [Include co
 ---
 ```
 
-**Description rules (CSO — Critical for Discovery):**
-- Start with "Use when..." — focus on triggering conditions
-- Third person — no "I can" / "You can"
-- Include specific symptoms, error messages, tool names, scenarios
-- **NEVER summarize the skill's workflow** in description — agent may follow the summary instead of reading the full skill
-- Keep under 500 characters if possible; max 1024
-
-```yaml
-# ❌ BAD: Summarizes workflow
-description: Use when executing plans - dispatches subagent per task with code review between tasks
-
-# ✅ GOOD: Just triggering conditions
-description: Use when executing implementation plans with independent tasks in the current session
-```
+**Description rules:** Start with "Use when...", third person, include specific triggers (error messages, tool names, scenarios), never summarize the skill's workflow, keep under 500 chars (max 1024). See `reference/cso.md` for full rules and examples.
 
 ### Body Structure
 
@@ -120,7 +107,7 @@ Self-check list when rationalizing.
 
 - **Explain the why.** Smart models comply better when they understand reasoning. Prefer explaining importance over heavy-handed MUSTs. If you find yourself writing ALWAYS/NEVER in all caps, that's a yellow flag — try reframing with reasoning first.
 - **One excellent example beats many mediocre ones.** Complete and runnable, not multi-language.
-- **Progressive disclosure.** SKILL.md < 500 lines. Move heavy reference to `reference/`. Link clearly: "See reference/X.md for Y."
+- **Progressive disclosure.** SKILL.md < 500 lines; move heavy reference to `reference/` (one level deep, no nesting). Link clearly: "See reference/X.md for Y."
 - **No narrative storytelling.** "In session 2025-10-03 we found..." → delete.
 - **Bilingual content (Chinese + English)** when the skill targets bilingual users.
 
@@ -249,7 +236,7 @@ When each subagent completes, save timing data to `timing.json`:
 
 2. **Aggregate** — run:
    ```bash
-   python scripts/aggregate_benchmark.py <workspace>/iteration-N --skill-name <name>
+   python3 scripts/aggregate_benchmark.py <workspace>/iteration-N --skill-name <name>
    ```
    Produces `benchmark.json` and `benchmark.md`.
 
@@ -257,7 +244,7 @@ When each subagent completes, save timing data to `timing.json`:
 
 4. **Launch eval viewer**:
    ```bash
-   python scripts/generate_review.py <workspace>/iteration-N --skill-name "my-skill" --benchmark <workspace>/iteration-N/benchmark.json
+   python3 scripts/generate_review.py <workspace>/iteration-N --skill-name "my-skill" --benchmark <workspace>/iteration-N/benchmark.json
    ```
    For iteration 2+, add `--previous-workspace <workspace>/iteration-<N-1>`.
    Headless environments: use `--static <output_path>` for standalone HTML.
@@ -323,7 +310,7 @@ Present eval set using HTML template:
 ### Run Optimization Loop
 
 ```bash
-python scripts/run_loop.py \
+python3 scripts/run_loop.py \
   --eval-set <path-to-trigger-eval.json> \
   --skill-path <path-to-skill> \
   --model <model-id> \
@@ -331,7 +318,7 @@ python scripts/run_loop.py \
   --verbose
 ```
 
-This runs the full loop: 60/40 train-test split, evaluates current description (3 runs per query for reliability), calls Claude to propose improvements, re-evaluates, iterates up to 5 times. Returns `best_description` selected by test score.
+Requires `claude` CLI (Claude Code only; skip if unavailable). This runs the full loop: 60/40 train-test split, evaluates current description (3 runs per query for reliability), calls Claude to propose improvements, re-evaluates, iterates up to 5 times. Returns `best_description` selected by test score.
 
 ### Apply Result
 
@@ -342,7 +329,7 @@ Update SKILL.md frontmatter with `best_description`. Show user before/after and 
 Before deploying, run structural validation:
 
 ```bash
-python scripts/quick_validate.py <skill-directory>
+python3 scripts/quick_validate.py <skill-directory>
 ```
 
 Checks: SKILL.md exists, valid frontmatter, name is kebab-case, description under 1024 chars, no unexpected frontmatter keys.

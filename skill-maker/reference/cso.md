@@ -84,7 +84,7 @@ Every token in SKILL.md competes with conversation history. Keep it lean.
 For systematic description improvement, use the automated optimization tool:
 
 ```bash
-python scripts/run_loop.py \
+python3 scripts/run_loop.py \
   --eval-set trigger_eval.json \
   --skill-path /path/to/skill \
   --model <model-id> \

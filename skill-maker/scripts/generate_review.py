@@ -210,7 +210,7 @@ def load_eval_data(workspace_dir: Path, iteration: int = None) -> list[dict]:
                     if output_files:
                         try:
                             eval_item["output"] = output_files[0].read_text()[:5000]
-                        except:
+                        except (UnicodeDecodeError, OSError):
                             eval_item["output"] = f"[{output_files[0].name}]"
 
         if meta.get("prompt"):

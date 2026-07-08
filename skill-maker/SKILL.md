@@ -236,7 +236,7 @@ When each subagent completes, save timing data to `timing.json`:
 
 2. **Aggregate** — run:
    ```bash
-   python3 scripts/aggregate_benchmark.py <workspace>/iteration-N --skill-name <name>
+   python scripts/aggregate_benchmark.py <workspace>/iteration-N --skill-name <name>
    ```
    Produces `benchmark.json` and `benchmark.md`.
 
@@ -244,7 +244,7 @@ When each subagent completes, save timing data to `timing.json`:
 
 4. **Launch eval viewer**:
    ```bash
-   python3 scripts/generate_review.py <workspace>/iteration-N --skill-name "my-skill" --benchmark <workspace>/iteration-N/benchmark.json
+   python scripts/generate_review.py <workspace>/iteration-N --skill-name "my-skill" --benchmark <workspace>/iteration-N/benchmark.json
    ```
    For iteration 2+, add `--previous-workspace <workspace>/iteration-<N-1>`.
    Headless environments: use `--static <output_path>` for standalone HTML.
@@ -310,7 +310,7 @@ Present eval set using HTML template:
 ### Run Optimization Loop
 
 ```bash
-python3 scripts/run_loop.py \
+python scripts/run_loop.py \
   --eval-set <path-to-trigger-eval.json> \
   --skill-path <path-to-skill> \
   --model <model-id> \
@@ -329,7 +329,7 @@ Update SKILL.md frontmatter with `best_description`. Show user before/after and 
 Before deploying, run structural validation:
 
 ```bash
-python3 scripts/quick_validate.py <skill-directory>
+python scripts/quick_validate.py <skill-directory>
 ```
 
 Checks: SKILL.md exists, valid frontmatter, name is kebab-case, description under 1024 chars, no unexpected frontmatter keys.

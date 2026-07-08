@@ -21,6 +21,7 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 | `playwright-cdp` | Chrome CDP browser automation via Playwright |
 | `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script |
 | `reviewing-skills` | Systematic skill quality evaluation framework |
+| `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
 
 ## Skill Structure
 
@@ -30,6 +31,8 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
   templates/        # Copy-paste-runnable code templates
   reference/        # Supplementary detail (troubleshooting, API docs)
   scripts/          # CLI tools
+  agents/           # Subagent instructions (grader, analyzer, comparator)
+  assets/           # Templates, static files
 ```
 
 ## Conventions

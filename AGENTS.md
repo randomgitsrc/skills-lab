@@ -7,7 +7,7 @@ Shared skill directory for AI coding agents. Each subdirectory is a self-contain
 ## Structure
 
 - Each skill = one top-level directory with `SKILL.md` as the entrypoint
-- Supporting files go in `templates/`, `reference/`, or `scripts/` under the skill directory
+- Supporting files go in `templates/`, `reference/`, `scripts/`, `agents/`, or `assets/` under the skill directory
 - No build step, no package.json, no CI — these are instruction files, not runnable packages
 
 ## Skill Deployment
@@ -29,6 +29,7 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 | `playwright-cdp` | Chrome CDP browser automation via Playwright |
 | `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script |
 | `reviewing-skills` | Systematic skill quality evaluation framework |
+| `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
 
 ## Conventions
 
@@ -44,3 +45,4 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 - Keep SKILL.md under 500 lines; move detail to `reference/`
 - Code snippets must be copy-paste-runnable, no `...` or `TODO` placeholders
 - Test Playwright scripts against CDP at `127.0.0.1:18800` — never use `chromium.launch()`
+- skill-maker scripts require Python 3.10+ and `pip install pyyaml`; description optimization also requires `claude` CLI

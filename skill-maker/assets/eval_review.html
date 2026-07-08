@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trigger Eval Review: __SKILL_NAME_PLACEHOLDER__</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #e0e0e0; }
+  .container { max-width: 1000px; margin: 0 auto; }
+  h1 { color: #7c3aed; }
+  .skill-info { background: #16213e; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+  .skill-name { font-weight: bold; color: #c4b5fd; }
+  .skill-desc { color: #aaa; margin-top: 8px; font-size: 0.95em; }
+  .eval-item { background: #16213e; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+  .eval-top { display: flex; justify-content: space-between; align-items: center; }
+  .eval-query { flex: 1; }
+  .toggle-group { display: flex; gap: 0; }
+  .toggle-btn { padding: 6px 14px; cursor: pointer; border: 1px solid #444; background: #0f172a; color: #aaa; font-size: 0.9em; }
+  .toggle-btn:first-child { border-radius: 4px 0 0 4px; }
+  .toggle-btn:last-child { border-radius: 0 4px 4px 0; }
+  .toggle-btn.active-trigger { background: #065f46; color: #6ee7b7; border-color: #065f46; }
+  .toggle-btn.active-no-trigger { background: #7f1d1d; color: #fca5a5; border-color: #7f1d1d; }
+  .eval-textarea { width: 100%; min-height: 60px; background: #0f172a; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; padding: 8px; margin-top: 8px; font-family: inherit; resize: vertical; }
+  .actions { display: flex; gap: 12px; margin-top: 20px; }
+  .btn { padding: 10px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 1em; }
+  .btn-primary { background: #7c3aed; color: white; }
+  .btn-primary:hover { background: #6d28d9; }
+  .btn-secondary { background: #333; color: #ccc; }
+  .btn-secondary:hover { background: #444; }
+  .add-btn { background: #16213e; border: 1px dashed #555; border-radius: 8px; padding: 12px; color: #888; cursor: pointer; text-align: center; margin-bottom: 12px; }
+  .add-btn:hover { border-color: #7c3aed; color: #7c3aed; }
+  .delete-btn { background: none; border: none; color: #666; cursor: pointer; font-size: 0.85em; margin-left: 8px; }
+  .delete-btn:hover { color: #fca5a5; }
+  .counter { color: #888; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Trigger Eval Review</h1>
+<div class="skill-info">
+  <div class="skill-name">__SKILL_NAME_PLACEHOLDER__</div>
+  <div class="skill-desc">__SKILL_DESCRIPTION_PLACEHOLDER__</div>
+</div>
+<div id="eval-list"></div>
+<div class="add-btn" onclick="addEval()">+ Add eval query</div>
+<div class="actions">
+  <button class="btn btn-primary" onclick="exportEvalSet()">Export Eval Set</button>
+  <span class="counter" id="counter"></span>
+</div>
+</div>
+<script>
+let evalData = __EVAL_DATA_PLACEHOLDER__;
+
+function renderEvals() {
+  const list = document.getElementById('eval-list');
+  list.innerHTML = '';
+  evalData.forEach((item, idx) => {
+    const div = document.createElement('div');
+    div.className = 'eval-item';
+    div.innerHTML = `
+      <div class="eval-top">
+        <div class="eval-query">
+          <textarea class="eval-textarea" style="min-height:40px" onchange="evalData[${idx}].query=this.value">${item.query || ''}</textarea>
+        </div>
+        <div class="toggle-group">
+          <button class="toggle-btn ${item.should_trigger ? 'active-trigger' : ''}" onclick="setTrigger(${idx}, true)">Should trigger</button>
+          <button class="toggle-btn ${!item.should_trigger ? 'active-no-trigger' : ''}" onclick="setTrigger(${idx}, false)">Should NOT</button>
+        </div>
+        <button class="delete-btn" onclick="deleteEval(${idx})">✕</button>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+  const trigger = evalData.filter(e => e.should_trigger).length;
+  const noTrigger = evalData.filter(e => !e.should_trigger).length;
+  document.getElementById('counter').textContent = `${trigger} should-trigger | ${noTrigger} should-not | ${evalData.length} total`;
+}
+
+function setTrigger(idx, value) {
+  evalData[idx].should_trigger = value;
+  renderEvals();
+}
+
+function deleteEval(idx) {
+  evalData.splice(idx, 1);
+  renderEvals();
+}
+
+function addEval() {
+  evalData.push({ query: '', should_trigger: true });
+  renderEvals();
+  const textareas = document.querySelectorAll('.eval-textarea');
+  if (textareas.length) textareas[textareas.length - 1].focus();
+}
+
+function exportEvalSet() {
+  const valid = evalData.filter(e => e.query.trim());
+  const blob = new Blob([JSON.stringify(valid, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'eval_set.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+renderEvals();
+</script>
+</body>
+</html>

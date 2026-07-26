@@ -81,7 +81,8 @@ def check_gitignore(verbose: bool = False) -> list[str]:
 
 def precheck_key_existence(models: list[dict]) -> tuple[list[dict], list[str]]:
     """启动时预检：只查环境变量/`.env`中是否存在对应key，不做网络验证。
-    返回 (可用模型列表, 被剔除模型的名字列表)，供fallback链更快收敛到真正可用的模型。
+    返回 (可用模型列表, 被剔除模型的provider/name ref列表)，供fallback链更快收敛到真正可用的模型。
+    用provider/name而非裸name，避免跨provider重名时这条提示看不出具体是哪个model。
     """
     available = []
     unavailable = []
@@ -93,5 +94,5 @@ def precheck_key_existence(models: list[dict]) -> tuple[list[dict], list[str]]:
         if resolve_key(api_key_env) is not None:
             available.append(m)
         else:
-            unavailable.append(m["name"])
+            unavailable.append(f"{m['provider']}/{m['name']}")
     return available, unavailable

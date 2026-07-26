@@ -8,8 +8,11 @@ vision-analyze.py — vision-engine CLI 主入口。
   vision-analyze.py -i img.png -r ocr
   vision-analyze.py -i img.png -r locate -p "找到确认按钮"
   vision-analyze.py -i img.png -r locate-ui -p "登录按钮"
-  vision-analyze.py -i1 a.png -i2 b.png -r compare
+  vision-analyze.py -i a.png -i2 b.png -r compare
   vision-analyze.py -i img.png -c '{"task_goal":"验证按钮布局"}'
+  vision-analyze.py -i img.png --model sonnet                # 强制指定model(可用alias或provider/name)
+  vision-analyze.py --verify-grounding gemini-3-pro           # 实测某model的grounding准确度
+  vision-analyze.py --self-test                               # 批量存活检查config里配了key的全部model
 
 退出码:
   0 成功
@@ -39,7 +42,46 @@ from adapters import anthropic_api, openai_api, google_api, omniparser_api  # no
 from adapters.common import AdapterHTTPError, image_dimensions  # noqa: E402
 
 DEFAULT_CONFIG_PATH = SCRIPT_DIR.parent / "config" / "vision-config.json"
-SUPPORTED_SCHEMA_VERSIONS = {"2.0"}
+SUPPORTED_SCHEMA_VERSIONS = {"4.0"}
+
+# provider级别的共享字段：在providers[provider_id]下声明一次，model条目可以覆盖同名字段
+PROVIDER_LEVEL_FIELDS = ("base_url", "api_format", "api_key_env")
+
+
+def model_ref(model: dict) -> str:
+    """身份识别用provider/name复合key，不是裸name——不同provider下可以有同名model，
+    这是OpenClaw等成熟多provider路由器的通行做法，也是这轮修正的地方。"""
+    return f"{model['provider']}/{model['name']}"
+
+
+def resolve_ref_or_alias(models: list[dict], ref_or_alias: str) -> dict | None:
+    """任何接受model引用的地方（preferred_models/--model/--verify-grounding）都通过这个函数解析，
+    优先精确匹配provider/name完整ref，其次匹配alias（alias是全局扁平命名空间，加载时已校验唯一）。"""
+    for m in models:
+        if model_ref(m) == ref_or_alias:
+            return m
+    for m in models:
+        if m.get("alias") == ref_or_alias:
+            return m
+    return None
+
+
+def _sanitize_ref_for_filename(ref: str) -> str:
+    return ref.replace("/", "__")
+
+
+def _flatten_providers(raw_config: dict) -> list[dict]:
+    """把按provider分组的nested结构拍平成内部使用的扁平models列表。
+    这样select_candidates/run_text_role等下游逻辑完全不用感知config authoring格式的变化。"""
+    flat = []
+    for provider_id, provider_cfg in raw_config.get("providers", {}).items():
+        shared = {k: provider_cfg[k] for k in PROVIDER_LEVEL_FIELDS if k in provider_cfg}
+        for m in provider_cfg.get("models", []):
+            merged = dict(shared)
+            merged.update(m)  # model条目里的同名字段可以覆盖provider级别的共享值
+            merged["provider"] = provider_id
+            flat.append(merged)
+    return flat
 
 
 # ────────────────────────── 配置加载与校验 ──────────────────────────
@@ -60,13 +102,32 @@ def load_config(config_path: Path) -> dict:
         )
         sys.exit(1)
 
+    config["models"] = _flatten_providers(config)
+
+    # system_prompt_file：允许把长prompt外置到.md文件，避免inline字符串难编辑/难diff。
+    # 路径相对于config.json自身所在目录。读取后直接填进role["system_prompt"]，
+    # 下游所有引用role.get("system_prompt")的代码完全不用感知这层区别。
+    for role_name, role in config.get("roles", {}).items():
+        prompt_file = role.get("system_prompt_file")
+        if prompt_file:
+            if role.get("system_prompt"):
+                print(f"Error: role '{role_name}' 同时配置了system_prompt和system_prompt_file，"
+                      f"只能二选一", file=sys.stderr)
+                sys.exit(1)
+            full_path = config_path.parent / prompt_file
+            if not full_path.is_file():
+                print(f"Error: role '{role_name}' 的system_prompt_file指向的文件不存在: {full_path}",
+                      file=sys.stderr)
+                sys.exit(1)
+            role["system_prompt"] = full_path.read_text(encoding="utf-8")
+
     # capability白名单静态校验：grounding/ui-grounding能力只允许出现在白名单provider下
     whitelist = config.get("capability_provider_whitelist", {})
     for model in config["models"]:
         for cap, allowed_providers in whitelist.items():
             if cap in model.get("capabilities", []) and model["provider"] not in allowed_providers:
                 print(
-                    f"Error: model '{model['name']}' declares capability '{cap}' "
+                    f"Error: model '{model_ref(model)}' declares capability '{cap}' "
                     f"but provider '{model['provider']}' is not in whitelist {allowed_providers}",
                     file=sys.stderr,
                 )
@@ -91,6 +152,36 @@ def load_config(config_path: Path) -> dict:
     if unsatisfiable:
         print(f"[警告] 以下capability被role要求，但没有任何model声明它，"
               f"对应role将永远无法选中候选model: {sorted(unsatisfiable)}", file=sys.stderr)
+
+    # 唯一性校验：身份是provider/name复合key，不是裸name。同一provider下的models不能重名
+    # （因为RPM计数文件名/--model匹配/preferred_models查找都靠provider/name这个ref），
+    # 但跨provider允许同名——这是这轮的修正点，上一版误把name当成全局唯一标识了。
+    seen_refs = set()
+    for m in config["models"]:
+        ref = model_ref(m)
+        if ref in seen_refs:
+            print(f"Error: model ref重复: '{ref}'。同一provider下的model name不能重复"
+                  f"（不同provider下允许同名，因为身份识别用的是完整的provider/name）。",
+                  file=sys.stderr)
+            sys.exit(1)
+        seen_refs.add(ref)
+
+    # alias是全局扁平命名空间（跟provider/name不同，不按provider分区），必须唯一，
+    # 且不能含'/'（避免跟provider/name格式混淆，解析时无法区分）。
+    seen_aliases = {}
+    for m in config["models"]:
+        alias = m.get("alias")
+        if not alias:
+            continue
+        if "/" in alias:
+            print(f"Error: model '{model_ref(m)}' 的alias '{alias}' 不能包含'/'"
+                  f"（会跟provider/name格式混淆）", file=sys.stderr)
+            sys.exit(1)
+        if alias in seen_aliases:
+            print(f"Error: alias '{alias}' 被多个model使用（{seen_aliases[alias]} 和 {model_ref(m)}），"
+                  f"alias必须全局唯一", file=sys.stderr)
+            sys.exit(1)
+        seen_aliases[alias] = model_ref(m)
 
     return config
 
@@ -134,14 +225,51 @@ def select_candidates(config: dict, role: dict) -> list[dict]:
 
     preferred = role.get("preferred_models")
     if preferred:
-        by_name = {m["name"]: m for m in candidates}
-        ordered = [by_name.pop(name) for name in preferred if name in by_name]
-        # preferred_models里没提到的候选，按原priority排在后面，不丢失fallback安全网
-        remaining = sorted(by_name.values(), key=lambda m: m.get("priority", 999))
+        by_ref = {model_ref(m): m for m in candidates}
+        all_refs_and_aliases = {model_ref(m) for m in config["models"]} | \
+                                {m["alias"] for m in config["models"] if m.get("alias")}
+        ordered = []
+        seen_entries = set()
+        for entry in preferred:
+            if entry in seen_entries:
+                continue  # preferred_models里写重复了，跳过第二次，不当成新的警告case
+            seen_entries.add(entry)
+            m = resolve_ref_or_alias(candidates, entry)
+            if m is not None and model_ref(m) in by_ref:
+                ordered.append(by_ref.pop(model_ref(m)))
+            elif m is not None:
+                continue  # alias和完整ref指向同一个model、且已经被前面的条目选过了，跳过不重复警告
+            elif entry not in all_refs_and_aliases:
+                print(f"[警告] role的preferred_models里的'{entry}'在config中不存在"
+                      f"（检查拼写/alias/是否已删除该model）", file=sys.stderr)
+            else:
+                print(f"[警告] role的preferred_models里的'{entry}'不满足当前role的capability要求，"
+                      f"已被排除在候选池外", file=sys.stderr)
+        # preferred_models里没提到的候选，按(deprecated, priority)排在后面，不丢失fallback安全网
+        remaining = sorted(by_ref.values(), key=lambda m: (bool(m.get("deprecated")), m.get("priority", 999)))
         return ordered + remaining
 
-    candidates.sort(key=lambda m: m.get("priority", 999))
+    # deprecated=True的model无论priority多小，一律排到最后——依然可用于fallback，但不被优先选中
+    candidates.sort(key=lambda m: (bool(m.get("deprecated")), m.get("priority", 999)))
     return candidates
+
+
+# ────────────────────────── --model 解析辅助函数 ──────────────────────────
+
+def resolve_forced_model(candidates: list[dict], forced_input: str) -> tuple[dict | None, str | None]:
+    """--model参数解析：优先精确匹配provider/name完整ref，其次匹配alias，
+    最后只有裸name且在candidates里唯一时才允许简写。
+    返回(匹配到的model, 错误信息)，两者恰好一个非None。"""
+    m = resolve_ref_or_alias(candidates, forced_input)
+    if m is not None:
+        return m, None
+    bare_matches = [m for m in candidates if m["name"] == forced_input]
+    if len(bare_matches) == 1:
+        return bare_matches[0], None
+    if len(bare_matches) > 1:
+        refs = [model_ref(m) for m in bare_matches]
+        return None, f"'{forced_input}' 在多个provider下存在同名model({refs})，请用完整的provider/name或alias指定"
+    return None, None
 
 
 # ────────────────────────── text 类 role 的 fallback 主循环 ──────────────────────────
@@ -151,11 +279,11 @@ def run_text_role(config: dict, role_name: str, role: dict, user_prompt: str,
     candidates = select_candidates(config, role)
 
     if forced_model:
-        match = next((m for m in candidates if m["name"] == forced_model), None)
+        match, err = resolve_forced_model(candidates, forced_model)
         if match is None:
             return {"status": "error", "reason": "forced_model_not_eligible",
-                     "detail": f"'{forced_model}' 不在此role的candidates中"
-                                f"(可能不满足capability要求，或config里不存在该model名)", "attempts": []}
+                     "detail": err or f"'{forced_model}' 不在此role的candidates中"
+                                f"(可能不满足capability要求，或config里不存在该model)", "attempts": []}
         candidates = [match]  # 只试这一个，不fallback——这是--model的设计初衷，用于隔离测试单个model
 
     candidates, unavailable = env_security.precheck_key_existence(candidates)
@@ -167,8 +295,9 @@ def run_text_role(config: dict, role_name: str, role: dict, user_prompt: str,
 
     attempts = []
     for model in candidates:
-        if ratelimit.is_rpm_exceeded(model["name"], model.get("rpm_limit", 60)):
-            attempts.append({"model": model["name"], "status": "rpm_limited"})
+        ref = model_ref(model)
+        if ratelimit.is_rpm_exceeded(_sanitize_ref_for_filename(ref), model.get("rpm_limit", 60)):
+            attempts.append({"model": ref, "status": "rpm_limited"})
             continue
 
         api_key = env_security.resolve_key(model.get("api_key_env"))
@@ -176,11 +305,15 @@ def run_text_role(config: dict, role_name: str, role: dict, user_prompt: str,
         try:
             text = call_model(model, api_key, role.get("system_prompt"), user_prompt, image_paths)
         except AdapterHTTPError as e:
-            attempts.append({"model": model["name"], "status": e.kind, "error": str(e)})
+            attempts.append({"model": ref, "status": e.kind, "error": str(e)})
             continue
         latency_ms = int((time.time() - t0) * 1000)
-        attempts.append({"model": model["name"], "status": "success", "latency_ms": latency_ms})
-        return {"status": "success", "model_used": model["name"], "provider": model["provider"],
+        attempts.append({"model": ref, "status": "success", "latency_ms": latency_ms})
+        if verbose and model.get("deprecated"):
+            note = model.get("deprecated_note", "")
+            print(f"[verbose] 使用了标记为deprecated的model '{ref}'"
+                  f"{('：' + note) if note else ''}，建议尽快迁移到替代model", file=sys.stderr)
+        return {"status": "success", "model_used": ref, "provider": model["provider"],
                 "result": text, "attempts": attempts}
 
     return {"status": "error", "reason": "all_models_failed", "attempts": attempts}
@@ -193,11 +326,11 @@ def run_locate_role(config: dict, role_name: str, role: dict, user_prompt: str,
     candidates = select_candidates(config, role)
 
     if forced_model:
-        match = next((m for m in candidates if m["name"] == forced_model), None)
+        match, err = resolve_forced_model(candidates, forced_model)
         if match is None:
             return {"status": "error", "reason": "forced_model_not_eligible",
-                     "detail": f"'{forced_model}' 不在此role的candidates中"
-                                f"(可能不满足capability要求，或config里不存在该model名)", "attempts": []}
+                     "detail": err or f"'{forced_model}' 不在此role的candidates中"
+                                f"(可能不满足capability要求，或config里不存在该model)", "attempts": []}
         candidates = [match]
 
     candidates, unavailable = env_security.precheck_key_existence(candidates)
@@ -211,8 +344,9 @@ def run_locate_role(config: dict, role_name: str, role: dict, user_prompt: str,
     attempts = []
 
     for model in candidates:
-        if ratelimit.is_rpm_exceeded(model["name"], model.get("rpm_limit", 60)):
-            attempts.append({"model": model["name"], "status": "rpm_limited"})
+        ref = model_ref(model)
+        if ratelimit.is_rpm_exceeded(_sanitize_ref_for_filename(ref), model.get("rpm_limit", 60)):
+            attempts.append({"model": ref, "status": "rpm_limited"})
             continue
 
         api_key = env_security.resolve_key(model.get("api_key_env"))
@@ -220,7 +354,7 @@ def run_locate_role(config: dict, role_name: str, role: dict, user_prompt: str,
         try:
             raw_text = call_model(model, api_key, role.get("system_prompt"), user_prompt, [image_path])
         except AdapterHTTPError as e:
-            attempts.append({"model": model["name"], "status": e.kind, "error": str(e)})
+            attempts.append({"model": ref, "status": e.kind, "error": str(e)})
             continue
         latency_ms = int((time.time() - t0) * 1000)
 
@@ -228,12 +362,16 @@ def run_locate_role(config: dict, role_name: str, role: dict, user_prompt: str,
         valid_entries, dropped = bbox_utils.extract_and_validate(raw_text, convention, width, height)
 
         if dropped == -1 or not valid_entries:
-            attempts.append({"model": model["name"], "status": "invalid_schema", "latency_ms": latency_ms})
+            attempts.append({"model": ref, "status": "invalid_schema", "latency_ms": latency_ms})
             continue
 
-        attempts.append({"model": model["name"], "status": "success",
+        attempts.append({"model": ref, "status": "success",
                           "latency_ms": latency_ms, "dropped_count": max(dropped, 0)})
-        return {"status": "success", "model_used": model["name"], "provider": model["provider"],
+        if verbose and model.get("deprecated"):
+            note = model.get("deprecated_note", "")
+            print(f"[verbose] 使用了标记为deprecated的model '{ref}'"
+                  f"{('：' + note) if note else ''}，建议尽快迁移到替代model", file=sys.stderr)
+        return {"status": "success", "model_used": ref, "provider": model["provider"],
                 "result": valid_entries, "dropped_count": max(dropped, 0), "attempts": attempts}
 
     return {"status": "error", "reason": "all_models_failed_or_invalid", "attempts": attempts}
@@ -265,7 +403,7 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
     try:
         raw_elements = omniparser_api.detect(model, image_path)
     except AdapterHTTPError as e:
-        return {"status": "error", "reason": e.kind, "attempts": [{"model": model["name"], "status": e.kind}]}
+        return {"status": "error", "reason": e.kind, "attempts": [{"model": model_ref(model), "status": e.kind}]}
     latency_ms = int((time.time() - t0) * 1000)
 
     converted = []
@@ -291,30 +429,95 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
                     f"请勿将此误判为'该元素不存在'")
 
     response = {
-        "status": "success", "model_used": model["name"], "provider": model["provider"],
+        "status": "success", "model_used": model_ref(model), "provider": model["provider"],
         "query_mode": "enumerate_then_filter", "matched_query": query,
         "filter_matched": bool(matched) if query else None,
         "total_elements_detected": total, "result": result,
-        "attempts": [{"model": model["name"], "status": "success", "latency_ms": latency_ms}],
+        "attempts": [{"model": model_ref(model), "status": "success", "latency_ms": latency_ms}],
     }
     if note:
         response["note"] = note
     return response
 
 
-# ────────────────────────── --verify-grounding: 实测grounding准确度 ──────────────────────────
+# ────────────────────────── --self-test: 批量存活检查 ──────────────────────────
 
 FIXTURE_DIR = SCRIPT_DIR / "fixtures"
+SELF_TEST_PROBE_IMAGE = FIXTURE_DIR / "self-test-probe.png"
+SELF_TEST_PROMPT = "回复OK即可，这是一次存活探测，不需要分析任何内容。"
+
+
+def run_self_test(config: dict) -> dict:
+    if not SELF_TEST_PROBE_IMAGE.is_file():
+        return {"status": "error", "reason": "fixture_missing",
+                "detail": "探测图缺失，检查scripts/fixtures/self-test-probe.png"}
+
+    results = []
+    for model in config["models"]:
+        entry = {"model": model_ref(model), "provider": model["provider"]}
+
+        # ui-grounding类(如omniparser)不是对话模型，走健康检查而非chat探测
+        if model.get("api_format") == "omniparser":
+            alive = omniparser_api.health_check(model["base_url"])
+            entry["status"] = "alive" if alive else "dead"
+            entry["method"] = "health_check"
+            results.append(entry)
+            continue
+
+        api_key_env = model.get("api_key_env")
+        if api_key_env and env_security.resolve_key(api_key_env) is None:
+            entry["status"] = "skipped_no_key"
+            results.append(entry)
+            continue
+
+        api_key = env_security.resolve_key(api_key_env)
+        t0 = time.time()
+        try:
+            call_model(model, api_key, None, SELF_TEST_PROMPT, [str(SELF_TEST_PROBE_IMAGE)])
+            entry["status"] = "alive"
+            entry["latency_ms"] = int((time.time() - t0) * 1000)
+        except AdapterHTTPError as e:
+            entry["status"] = "dead"
+            entry["error_kind"] = e.kind
+            entry["detail"] = str(e)
+        entry["method"] = "chat_probe"
+        if model.get("deprecated"):
+            entry["deprecated"] = True
+        results.append(entry)
+
+    alive_count = sum(1 for r in results if r["status"] == "alive")
+    dead_count = sum(1 for r in results if r["status"] == "dead")
+    tested_count = alive_count + dead_count
+
+    return {
+        "status": "completed",
+        "summary": {"total": len(results), "tested": tested_count,
+                    "alive": alive_count, "dead": dead_count,
+                    "skipped_no_key": len(results) - tested_count},
+        "results": results,
+    }
+
+
+# ────────────────────────── --verify-grounding: 实测grounding准确度 ──────────────────────────
+
 FIXTURE_IMAGE = FIXTURE_DIR / "grounding-probe.png"
 FIXTURE_TRUTH = FIXTURE_DIR / "grounding-probe-truth.json"
 IOU_PASS_THRESHOLD = 0.5  # 经验阈值：达到这个IoU认为"具备基本可用的grounding能力"
 
 
-def run_verify_grounding(config: dict, model_name: str) -> dict:
-    model = next((m for m in config["models"] if m["name"] == model_name), None)
+def run_verify_grounding(config: dict, model_ref_input: str) -> dict:
+    model = resolve_ref_or_alias(config["models"], model_ref_input)
     if model is None:
-        return {"status": "error", "reason": "model_not_found",
-                "detail": f"config里没有名为'{model_name}'的model"}
+        bare_matches = [m for m in config["models"] if m["name"] == model_ref_input]
+        if len(bare_matches) == 1:
+            model = bare_matches[0]
+        elif len(bare_matches) > 1:
+            return {"status": "error", "reason": "ambiguous_model",
+                    "detail": f"'{model_ref_input}' 在多个provider下存在同名model"
+                              f"({[model_ref(m) for m in bare_matches]})，请用完整的provider/name或alias指定"}
+        else:
+            return {"status": "error", "reason": "model_not_found",
+                    "detail": f"config里没有名为'{model_ref_input}'的model（provider/name、alias或裸name均未匹配）"}
 
     if not FIXTURE_IMAGE.is_file() or not FIXTURE_TRUTH.is_file():
         return {"status": "error", "reason": "fixture_missing",
@@ -323,10 +526,11 @@ def run_verify_grounding(config: dict, model_name: str) -> dict:
     truth = json.loads(FIXTURE_TRUTH.read_text())
     gt_box = truth["ground_truth_box"]
 
+    ref = model_ref(model)
     api_key = env_security.resolve_key(model.get("api_key_env"))
     if model.get("api_key_env") and api_key is None:
         return {"status": "error", "reason": "no_key",
-                "detail": f"'{model_name}'需要{model['api_key_env']}但未配置"}
+                "detail": f"'{ref}'需要{model['api_key_env']}但未配置"}
 
     locate_prompt = config["roles"]["locate"]["system_prompt"]
     width, height = image_dimensions(str(FIXTURE_IMAGE))
@@ -343,10 +547,10 @@ def run_verify_grounding(config: dict, model_name: str) -> dict:
 
     if not valid_entries:
         return {
-            "status": "completed", "model": model_name, "latency_ms": latency_ms,
+            "status": "completed", "model": ref, "latency_ms": latency_ms,
             "best_iou": 0.0, "raw_response_sample": raw_text[:300],
             "recommendation": (
-                f"未能从响应中提取出合法bbox（dropped={dropped}），不建议给'{model_name}'打grounding标签，"
+                f"未能从响应中提取出合法bbox（dropped={dropped}），不建议给'{ref}'打grounding标签，"
                 f"或该model的坐标格式约定(coordinate_convention)配置有误，先用-v核对raw_response"
             ),
         }
@@ -355,15 +559,15 @@ def run_verify_grounding(config: dict, model_name: str) -> dict:
     verdict = "达标" if best_iou >= IOU_PASS_THRESHOLD else "不达标"
     recommendation = (
         f"IoU={best_iou:.2f}（阈值{IOU_PASS_THRESHOLD}），{verdict}。"
-        + (f"有实测证据支持给'{model_name}'打grounding标签。"
+        + (f"有实测证据支持给'{ref}'打grounding标签。"
            if best_iou >= IOU_PASS_THRESHOLD else
-           f"不建议给'{model_name}'打grounding标签——即使返回了格式合法的bbox，位置也不够准。"
+           f"不建议给'{ref}'打grounding标签——即使返回了格式合法的bbox，位置也不够准。"
            f"注意：单张探测图只能说明'至少不是完全瞎编'，不能证明在真实复杂场景下同样准确，"
            f"建议正式启用前再用你的真实场景图片人工抽查几次。")
     )
 
     return {
-        "status": "completed", "model": model_name, "latency_ms": latency_ms,
+        "status": "completed", "model": ref, "latency_ms": latency_ms,
         "best_iou": round(best_iou, 3), "returned_boxes": valid_entries,
         "ground_truth_box": gt_box, "dropped_count": dropped,
         "recommendation": recommendation,
@@ -383,17 +587,26 @@ def main():
                          help="dispatch-context: 内联JSON字符串或文件路径。quick role忽略此参数")
     parser.add_argument("-f", "--format", default="json", choices=["json", "text", "yaml"])
     parser.add_argument("--model", default=None,
-                         help="强制指定单个model名字，跳过priority排序与fallback，专用于测试/验证某个model，"
+                         help="强制指定单个model（provider/name完整ref、alias，或在candidates中唯一时"
+                              "可用裸name），跳过priority排序与fallback，专用于测试/验证某个model，"
                               "不建议在生产调用中使用（失去容灾能力）")
     parser.add_argument("--verify-grounding", metavar="MODEL_NAME", default=None,
                          help="用内置探测图实测某个model的grounding准确度(IoU)，给'该不该打grounding标签'"
                               "提供实测证据而非仅凭文档宣称。指定后忽略-i/-r等其他分析参数")
+    parser.add_argument("--self-test", action="store_true",
+                         help="遍历config里配了key的全部model，各发一次最小化探测请求，"
+                              "汇总存活/失效报告，用于定期核实model是否被下线，忽略-i/-r等其他分析参数")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
+
+    if args.self_test:
+        result = run_self_test(config)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result["status"] == "completed" and result["summary"]["dead"] == 0 else 1)
 
     if args.verify_grounding:
         result = run_verify_grounding(config, args.verify_grounding)
@@ -432,6 +645,8 @@ def main():
 
     if args.prompt:
         skip_cache = True  # 自定义-p时自动跳过缓存
+    if args.model:
+        skip_cache = True  # 指定--model时跳过缓存，否则可能拿到其他候选跑出的旧结果
 
     # 组装最终user_prompt
     if role_name == "quick":

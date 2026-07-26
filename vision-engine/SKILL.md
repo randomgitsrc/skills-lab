@@ -75,11 +75,14 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
                   quick role：即发给模型的唯一内容
 -c, --context   dispatch-context：内联JSON字符串或文件路径，quick role忽略
 -f, --format    json(默认) / text / yaml
---model NAME    强制指定单个model，跳过priority排序与fallback，专用于测试/验证单个model，
+--model NAME    强制指定单个model（provider/name完整ref、alias，或候选池内唯一时可用裸name），
+                 跳过priority排序与fallback，专用于测试/验证单个model，
                  不适用于locate-ui（该role候选池本就只有单个ui-grounding model）
 --verify-grounding MODEL_NAME
                  用内置探测图实测某model的grounding准确度(IoU)，配置维护用途，
                  详见 references/model-registration.md，指定后忽略-i/-r等参数
+--self-test     遍历config里配了key的全部model，各发一次最小化探测请求，汇总存活/失效报告，
+                 忽略-i/-r等参数。ui-grounding类model走健康检查而非chat探测
 --no-cache      跳过缓存
 
 退出码:
@@ -91,27 +94,59 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
   5 bbox_list结果校验失败（全部条目非法，locate/locate-ui专用）
 ```
 
-## 关于"用哪个model" —— 两层可配置机制
+## 关于"用哪个model" —— models是资源清单，选择逻辑挂在role底下
 
-模型候选池由`capability`匹配决定，但**选中哪一个**是可配置的，不是写死的逻辑：
+`providers.<id>.models`只是一份**资源清单**：列清楚有哪些model、各自具备什么`capabilities`，不承载
+任何"该用谁"的决策逻辑。真正决定"这次调用选谁"的，是下面这两层，都是**role自己的属性**，不是外挂的：
 
-1. **`roles[].preferred_models`**（config级，按role定向）：给某个role指定一个优先model名单，
-   未列出的候选仍按原`priority`排在后面兜底，不丢失fallback安全网。适合"OCR任务优先用GPT-4o，
-   综合描述任务优先用Claude"这类长期性偏好。
-2. **`--model NAME`**（CLI级，一次性强制）：这次调用只试指定的model，**不fallback**——
-   专用于测试/验证某个model是否可用，不建议在生产调用里用（会丢失容灾能力）。指定的model若不满足
-   该role的capability要求，直接报错(exit 1)，不会静默降级成别的model。
+1. **`roles[].requires`**（自动，必经）：按capability筛出这个role能用的全部候选，这一层不能跳过。
+2. **`roles[].preferred_models`**（可选，role自带的"快捷子集"）：从上一步筛出的候选里，指定一份优先
+   顺序名单——**这就是"这个role该用哪几个"的地方**，直接写在role定义里，不需要额外的CLI参数去触发：
+   ```json
+   "comprehensive": {
+     "preferred_models": ["sonnet", "gpt"],
+     ...
+   }
+   ```
+   没列出的候选仍按`priority`排在后面兜底，不丢失fallback安全网。
+
+`--model NAME`（CLI级，一次性强制）是另一个维度：这次调用只试指定的model，**不fallback**——专用于
+测试/验证某个model是否可用，不建议在生产调用里用（会丢失容灾能力）。指定的model若不满足该role的
+capability要求，直接报错(exit 1)，不会静默降级成别的model。
+
+**alias：不想每次都写全`provider/name`**，可以给model起个短名字：
+```json
+{"name": "claude-sonnet-5", "alias": "sonnet", ...}
+```
+`--model`、`--verify-grounding`、`preferred_models`这几处都认alias，效果跟写完整`provider/name`一样。
+alias是全局扁平命名空间（不像`name`按provider分区），必须整个config里唯一，且不能包含`/`（会跟
+`provider/name`格式混淆），加载时都会校验。
 
 **没配key的model不会拖累调用**：启动时会预检每个候选model的`api_key_env`对应环境变量是否存在，
 没配key的直接从候选池剔除（`-v`模式可看到被剔除的名单），不会等到真正发请求才发现不可用，
 也不需要每次都把config里全部model都配上key才能用。
 
+**model过时/被下线的处理**：`providers[provider_id].models[].deprecated: true`把某model标记为"要退役但还能兜底用"——
+无论`priority`数字多小，排序时一律排到候选池最后，依然可被fallback用到，只是不会被优先选中；
+`-v`模式下用到deprecated model会提醒一句（可配`deprecated_note`说明迁移去向）。定期核实model是否
+已经被下线，用`--self-test`遍历config里配了key的全部model各发一次最小化探测请求，汇总存活/失效报告，
+不用等真正业务调用失败才发现某个model早就不能用了。
+
+**`name`不是全局唯一标识，`provider/name`才是**：同一provider下的model name不能重复（加载时校验，
+重复直接拒绝），但跨provider允许同名——身份识别用的是完整的`provider/name`这个ref（如
+`anthropic/claude-sonnet-5`），这是多provider路由器的通行做法（OpenClaw等项目也是这样设计的）。
+`--model`/`--verify-grounding`优先按完整ref或alias匹配，如果某个裸name在候选池里只对应一个model也
+可以简写，但存在跨provider重名时必须写全称或alias，否则会报"存在歧义"拒绝而不是随便选一个。系统本身
+无状态，不存在"当前锁定用哪个model"的持久化概念，每次调用独立重新计算候选池，`priority`数字本身就是
+fallback尝试顺序，不是另有一套机制。
+
 ## Capabilities 与新model注册
 
 **这部分内容不是分析图片时需要的**，是配置维护类内容。如果当前任务是"给vision-config.json加一个
-新model"或"判断该给某个model打什么capability标签"，这不是本skill的分析场景，去读
-`references/model-registration.md`（里面有完整的capabilities判断标准、`--verify-grounding`实测工具用法）。
-本skill正常分析图片时不需要关心这些。
+新model"、"判断该给某个model打什么capability标签"、"改role的system_prompt"（长prompt可以用
+`system_prompt_file`外置成`config/prompts/*.md`，不用挤在一行json字符串里编辑），这些都不是本skill的
+分析场景，去读`references/model-registration.md`（里面有完整的capabilities判断标准、
+`--verify-grounding`实测工具用法、role字段完整说明）。本skill正常分析图片时不需要关心这些。
 
 ## Fallback 行为说明
 
@@ -156,7 +191,10 @@ vision-engine/
 ├── references/
 │   └── model-registration.md     — 配置维护类文档:capabilities判断标准、新model注册流程、
 │                                     --verify-grounding用法(不在分析任务中自动加载,需主动读)
-├── config/vision-config.json     — 模型列表、role定义、capability白名单、坐标约定
+├── config/
+│   ├── vision-config.json        — 模型列表(按provider分组)、role定义、capability白名单、坐标约定
+│   └── prompts/                  — 长system_prompt外置文件(comprehensive.md/locate.md)，
+│                                     role里用system_prompt_file指向这里，避免inline长字符串难编辑
 └── scripts/
     ├── vision-analyze.py         — CLI主入口
     ├── bbox_utils.py             — bbox容错提取/坐标转换/部分校验/IoU计算
@@ -165,11 +203,11 @@ vision-engine/
     ├── logger.py                 — 审计日志(白名单字段+轮转)
     ├── context.py                — dispatch-context解析/校验/降权拼装
     ├── env_security.py           — API key安全读取/预检/权限检查
-    ├── fixtures/                 — grounding能力实测用的探测图+ground truth
+    ├── fixtures/                 — --verify-grounding的探测图/ground truth、--self-test的最小化探测图
     └── adapters/
         ├── common.py             — 图片编码/媒体类型探测/HTTP错误分类
         ├── anthropic_api.py      — Claude/MiniMax等anthropic格式
-        ├── openai_api.py         — GPT-4o/Qwen等openai格式
+        ├── openai_api.py         — GPT-5.6/Qwen等openai兼容格式(也是接入自建OpenAI兼容服务的默认选择)
         ├── google_api.py         — Gemini原生格式(grounding基准)
         └── omniparser_api.py     — UI元素检测本地服务
 ```

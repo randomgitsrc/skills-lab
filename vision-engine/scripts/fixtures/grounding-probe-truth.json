@@ -1,0 +1,7 @@
+{
+  "image": "grounding-probe.png",
+  "description": "1000x1000白底图，中央有一个红色矩形。归一化坐标恰好等于像素坐标（画布本身就是1000x1000）。",
+  "target_label": "红色矩形",
+  "ground_truth_box": [400, 300, 600, 700],
+  "box_format": "[ymin, xmin, ymax, xmax], 0-1000归一化"
+}

@@ -1,0 +1,185 @@
+{
+  "schema_version": "2.0",
+  "capability_provider_whitelist": {
+    "grounding": [
+      "google",
+      "alibaba"
+    ],
+    "ui-grounding": [
+      "self-hosted"
+    ]
+  },
+  "models": [
+    {
+      "name": "claude-sonnet-4-20250514",
+      "provider": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_format": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "capabilities": [
+        "general",
+        "ocr"
+      ],
+      "priority": 1,
+      "timeout": 60,
+      "max_tokens": 4096,
+      "rpm_limit": 60
+    },
+    {
+      "name": "gpt-4o",
+      "provider": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_format": "openai",
+      "api_key_env": "OPENAI_API_KEY",
+      "capabilities": [
+        "general",
+        "ocr"
+      ],
+      "priority": 2,
+      "timeout": 60,
+      "max_tokens": 4096,
+      "rpm_limit": 60
+    },
+    {
+      "name": "gemini-2.5-flash",
+      "provider": "google",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "api_format": "google",
+      "api_key_env": "GOOGLE_API_KEY",
+      "capabilities": [
+        "general",
+        "ocr",
+        "grounding"
+      ],
+      "coordinate_convention": "gemini_1000",
+      "priority": 1,
+      "timeout": 60,
+      "max_tokens": 4096,
+      "rpm_limit": 60
+    },
+    {
+      "name": "qwen2.5-vl-72b",
+      "provider": "alibaba",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_format": "openai",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "capabilities": [
+        "general",
+        "ocr",
+        "grounding"
+      ],
+      "coordinate_convention": "qwen_pixel",
+      "priority": 2,
+      "timeout": 60,
+      "max_tokens": 4096,
+      "rpm_limit": 30
+    },
+    {
+      "name": "omniparser-local",
+      "provider": "self-hosted",
+      "base_url": "http://127.0.0.1:8765",
+      "api_format": "omniparser",
+      "api_key_env": null,
+      "capabilities": [
+        "ui-grounding"
+      ],
+      "coordinate_convention": "omniparser_pixel",
+      "priority": 1,
+      "timeout": 30,
+      "max_tokens": null,
+      "rpm_limit": 120
+    },
+    {
+      "name": "MiniMax-M3",
+      "provider": "minimax",
+      "base_url": "https://api.minimaxi.com/anthropic",
+      "api_format": "anthropic",
+      "api_key_env": "MINIMAX_API_KEY",
+      "capabilities": [
+        "general"
+      ],
+      "priority": 3,
+      "timeout": 60,
+      "max_tokens": 2048,
+      "rpm_limit": 30
+    }
+  ],
+  "roles": {
+    "quick": {
+      "system_prompt": null,
+      "requires": [
+        "general"
+      ],
+      "output_schema": "text",
+      "lightweight": true,
+      "skip_context": true
+    },
+    "comprehensive": {
+      "system_prompt": "分析图片前，先识别画面包含哪些图层/子系统。一张图可能同时包含多层，也可能只有一层，只输出实际存在的层，不存在的层不要输出、不要为了完整性而编造。\n\n可能的层：\n[UI层] 界面元素、控件、面板、按钮、菜单\n[2D图层] 平面图形、图表、图标、贴图、插画\n[3D场景层] 三维渲染内容、场景、模型\n[地图/地理层] 地图、卫星图、数字地球、GIS界面\n[特效层] 粒子、后处理效果（Bloom/景深/色差等）、合成痕迹\n[文字层] 需要识别的文本内容（如果文字是主要诉求，改用 ocr role 效果更好）\n\n每一层按以下结构输出：\n- 内容概述\n- 空间关系（相对/描述性位置，如\"左上角\"\"居中偏右\"\"第二排第三个\"；不要给出具体像素或坐标数值）\n- 该层特有属性：\n  - UI层：布局网格、对齐方式、层叠/浮层关系\n  - 3D场景层：透视/光影一致性、疑似渲染管线痕迹、模型精度感（低模/高模）\n  - 地图/地理层：可见地理线索，标注推断置信度，不确定不给出具体地名\n  - 特效层：疑似技术手段、边缘融合自然度\n\n整体风格（贯穿全图，不分层）：\n色彩基调、构图方式、写实/卡通/低多边形等风格判断、可能的参考风格或作品类型\n\n关于位置信息的输出规则（硬性）：\n- 默认只给相对/描述性位置\n- 只有画面中存在可读的坐标标注时，才输出具体数值坐标，并注明来源是\"画面标注\"\n- 没有可读坐标标注时，绝对不要编造具体数值坐标，即使被问到\n- 需要精确 bounding box 时，应改用 locate role，不在此 role 下提供",
+      "requires": [
+        "general"
+      ],
+      "output_schema": "text",
+      "default": true
+    },
+    "ocr": {
+      "system_prompt": "你是 OCR 专家。提取图片中所有文字，保持原始排版。表格用 Markdown 表格输出。",
+      "requires": [
+        "ocr"
+      ],
+      "output_schema": "text"
+    },
+    "code": {
+      "system_prompt": "你是代码截图识别专家。提取代码，保持缩进和语法。输出在代码块中，标注语言。",
+      "requires": [
+        "ocr"
+      ],
+      "output_schema": "text"
+    },
+    "compare": {
+      "system_prompt": "你是 UI 对比专家。对比两张图片的差异，重点关注布局、颜色、元素位置变化。",
+      "requires": [
+        "general"
+      ],
+      "multi_image": true,
+      "output_schema": "text"
+    },
+    "locate": {
+      "system_prompt": "找出图片中符合描述的元素，输出其边界框。\n\n坐标系：左上角为原点(0,0)，x向右增大，y向下增大。按你训练时熟悉的坐标习惯给出数值即可，不需要强行换算成其他约定——坐标格式转换由调用方处理。\n\n输出格式（仅此JSON数组本身，不要markdown代码块包裹，不要任何解释性文字）：\n[{\"label\": \"元素描述\", \"box\": [a, b, c, d], \"confidence\": \"high|medium|low\", \"type\": \"element|effect|region\"}]\n\n规则：\n- 只输出画面中确实存在、能明确圈定边界的元素\n- 边界模糊或部分遮挡的元素，confidence 标为 low\n- 特效没有硬边界，只能给近似区域，confidence 一律不高于 medium\n- 3D场景中物体在2D画面上的投影边界可以给出，type标注为element而非声称是三维坐标\n- 找不到符合描述的元素，返回空数组 []，不要为了给出结果而勉强framed一个区域",
+      "requires": [
+        "grounding"
+      ],
+      "output_schema": "bbox_list",
+      "query_mode": "targeted"
+    },
+    "locate-ui": {
+      "system_prompt": null,
+      "requires": [
+        "ui-grounding"
+      ],
+      "output_schema": "bbox_list",
+      "query_mode": "enumerate_then_filter"
+    }
+  },
+  "defaults": {
+    "role": "comprehensive",
+    "format": "json",
+    "timeout": 60
+  },
+  "cache": {
+    "enabled": false,
+    "dir": "~/.cache/vision-engine",
+    "ttl_hours": 24
+  },
+  "logging": {
+    "enabled": true,
+    "file": "~/.local/share/vision-engine/log.jsonl",
+    "level": "info",
+    "rotate_mb": 50,
+    "rotate_keep": 3
+  },
+  "context": {
+    "task_goal_max_chars": 120,
+    "prior_context_max_items": 2
+  }
+}

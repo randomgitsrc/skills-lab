@@ -108,7 +108,7 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
                  跳过priority排序与fallback，专用于测试/验证单个model
 --verify-grounding MODEL_NAME
                  用内置探测图实测某model的grounding准确度(IoU)，配置维护用途，
-                 详见 references/model-registration.md，指定后忽略-i/-r等参数
+                 详见 references/models.md，指定后忽略-i/-r等参数
 --self-test     遍历config里配了key的全部model，各发一次最小化探测请求，汇总存活/失效报告，
                  忽略-i/-r等参数。ui-grounding类model走健康检查而非chat探测
 --clear-quotas  清除本地quota限流数据（~/.local/share/vision-engine/ratelimit/），
@@ -171,14 +171,15 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
 vision-engine/
 ├── SKILL.md
 ├── references/
-│   ├── model-registration.md     — 新model注册流程、capabilities判断标准、--verify-grounding用法
-│   └── model-routing.md          — model路由逻辑、alias/provider/name身份识别、deprecated处理
+│   ├── models.md                  — model 路由/alias 身份识别、capabilities 判断、quota 框架、新 model 注册流程
+│   └── provider-rate-limits.md    — 各 provider 官方限流政策（Google/Anthropic/OpenAI/百炼/火山），config quotas 配值依据
 ├── config/
 │   ├── vision-config.json        — 模型列表(按provider分组)、role定义、capability白名单、坐标约定
 │   └── prompts/                  — 各role的system_prompt外置文件(7个.md)，
 │                                     role里用system_prompt_file引用，config中无inline长字符串
-└── scripts/
-    ├── vision-analyze.py         — CLI主入口
+├── scripts/
+│   ├── vision-analyze.py         — CLI主入口
+│   ├── vision-stats.py           — 调用统计+限流矫正工具（summary/quota/set/sync/clean/reset）
     ├── bbox_utils.py             — bbox容错提取/坐标转换/部分校验/IoU计算
     ├── ratelimit.py              — 通用quota限流(requests/tokens × 任意窗口) + 429冷却
     ├── cache.py                  — 缓存(hash+role)
@@ -203,4 +204,40 @@ vision-engine/
 
 ## 配置维护
 
-修改 model 路由、注册新 model、调整 capabilities → 见 `references/model-routing.md` 和 `references/model-registration.md`。
+修改 model 路由、注册新 model、调整 capabilities → 见 `references/models.md`。
+
+## 调用统计与限流矫正（vision-stats.py）
+
+本地 ratelimit 计数可能跟服务端不同步（其他客户端调用、quota 重置、残留数据）。
+`vision-stats.py` 是独立 CLI，用于统计和矫正。
+
+```bash
+# 路径同 vision-analyze.py，在 scripts/ 下
+
+# 查看调用统计（从审计日志）
+python3 scripts/vision-stats.py summary
+
+# 查看当前各模型各窗口 quota 使用率
+python3 scripts/vision-stats.py quota
+
+# 手动矫正：Google AI Studio 显示 RPD 已用 15/20，同步到本地
+python3 scripts/vision-stats.py set google-free/gemini-3.6-flash --used 15 --metric requests --window 86400
+
+# 自动矫正：从 Anthropic/OpenAI 响应头读取真实余量并覆写本地
+python3 scripts/vision-stats.py sync
+
+# 清理已删模型的残留限流数据
+python3 scripts/vision-stats.py clean --yes
+
+# 重置某模型全部限流数据（清零，下次调用自动重建）
+python3 scripts/vision-stats.py reset google-free/gemini-3.6-flash --yes
+```
+
+### Provider 矫正能力
+
+| provider | 自动(sync) | 手动(set) | 说明 |
+|---|---|---|---|
+| Anthropic | ✅ | ✅ | 响应头含 `anthropic-ratelimit-*-remaining` |
+| OpenAI | ✅ | ✅ | 响应头含 `x-ratelimit-remaining-*` |
+| Google | ❌ | ✅ | **无 rate limit header**，只能从 AI Studio 后台看后手动 set |
+| 百炼/火山 | ❌ | ✅ | 未公开 header，只能从控制台看后手动 set |

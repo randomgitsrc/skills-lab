@@ -39,4 +39,13 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     text_parts = [blk.get("text", "") for blk in blocks if blk.get("type") == "text"]
     if not text_parts:
         raise AdapterHTTPError("unknown", "model returned no text content block")
-    return {"text": "\n".join(text_parts), "usage": parse_usage("anthropic", data)}
+
+    # 提取 rate limit 响应头
+    rl_headers = {}
+    for k, v in r.headers.items():
+        kl = k.lower()
+        if kl.startswith("anthropic-ratelimit-"):
+            rl_headers[kl] = v
+
+    return {"text": "\n".join(text_parts), "usage": parse_usage("anthropic", data),
+            "rate_limit_headers": rl_headers}

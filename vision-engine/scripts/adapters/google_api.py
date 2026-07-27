@@ -45,4 +45,6 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     text_parts = [p.get("text", "") for p in parts_out if "text" in p]
     if not text_parts:
         raise AdapterHTTPError("unknown", "model returned no text part")
-    return {"text": "\n".join(text_parts), "usage": parse_usage("google", data)}
+    # Google 不返回 rate limit header（实测确认），返回空 dict
+    return {"text": "\n".join(text_parts), "usage": parse_usage("google", data),
+            "rate_limit_headers": {}}

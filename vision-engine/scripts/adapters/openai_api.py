@@ -39,4 +39,13 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     choices = data.get("choices", [])
     if not choices:
         raise AdapterHTTPError("unknown", "model returned no choices")
-    return {"text": choices[0]["message"]["content"], "usage": parse_usage("openai", data)}
+
+    # 提取 rate limit 响应头
+    rl_headers = {}
+    for k, v in r.headers.items():
+        kl = k.lower()
+        if "ratelimit" in kl or "rate-limit" in kl:
+            rl_headers[kl] = v
+
+    return {"text": choices[0]["message"]["content"], "usage": parse_usage("openai", data),
+            "rate_limit_headers": rl_headers}

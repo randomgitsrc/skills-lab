@@ -75,12 +75,12 @@ def mock_call_model(monkeypatch):
             kind, status = _mock.raise_for[ref]
             from adapters.common import AdapterHTTPError
             raise AdapterHTTPError(kind, f"mock {kind}", status)
-        return_obj = getattr(_mock, "return_obj", {"text": "ok", "usage": None})
+        return_obj = getattr(_mock, "return_obj", {"text": "ok", "usage": None, "rate_limit_headers": {}})
         return return_obj
 
     _mock.calls = calls
     _mock.raise_for = {}
-    _mock.return_obj = {"text": "ok", "usage": None}
+    _mock.return_obj = {"text": "ok", "usage": None, "rate_limit_headers": {}}
     monkeypatch.setattr(vision_analyze, "call_model", _mock)
     yield _mock
     _mock.raise_for = {}

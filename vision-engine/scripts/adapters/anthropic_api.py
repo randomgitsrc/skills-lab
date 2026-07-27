@@ -2,10 +2,12 @@
 import httpx
 
 from .common import encode_image, classify_http_error, AdapterHTTPError
+from .usage import parse_usage
 
 
 def call(model_cfg: dict, api_key: str, system_prompt: str | None,
-         user_prompt: str, image_paths: list[str]) -> str:
+         user_prompt: str, image_paths: list[str]) -> dict:
+    """返回 {"text": str, "usage": dict | None}。usage 来自 response.usage。"""
     b, _t = model_cfg["base_url"].rstrip("/"), model_cfg["timeout"]
     content = []
     for p in image_paths:
@@ -37,4 +39,4 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     text_parts = [blk.get("text", "") for blk in blocks if blk.get("type") == "text"]
     if not text_parts:
         raise AdapterHTTPError("unknown", "model returned no text content block")
-    return "\n".join(text_parts)
+    return {"text": "\n".join(text_parts), "usage": parse_usage("anthropic", data)}

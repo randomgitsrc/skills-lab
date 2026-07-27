@@ -2,10 +2,12 @@
 import httpx
 
 from .common import encode_image, classify_http_error, AdapterHTTPError
+from .usage import parse_usage
 
 
 def call(model_cfg: dict, api_key: str, system_prompt: str | None,
-         user_prompt: str, image_paths: list[str]) -> str:
+         user_prompt: str, image_paths: list[str]) -> dict:
+    """返回 {"text": str, "usage": dict | None}。usage 来自 response.usage。"""
     base = model_cfg["base_url"].rstrip("/")
     content = [{"type": "text", "text": user_prompt}]
     for p in image_paths:
@@ -37,4 +39,4 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     choices = data.get("choices", [])
     if not choices:
         raise AdapterHTTPError("unknown", "model returned no choices")
-    return choices[0]["message"]["content"]
+    return {"text": choices[0]["message"]["content"], "usage": parse_usage("openai", data)}

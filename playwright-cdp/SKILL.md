@@ -11,7 +11,7 @@ Browser automation via Playwright connected to local Chrome CDP (port 18800). Ch
 
 **Use:** navigate/click/fill forms, screenshot, verify WebGL/CSP/DOM, mobile emulation, mouse/keyboard/touch interactions, any real browser engine task.
 
-**Not use:** static HTML parsing (→ Read/Grep), HTTP requests (→ webfetch/curl), headless scraping without visuals, image analysis (→ vision-analyzer skill).
+**Not use:** static HTML parsing (→ Read/Grep), HTTP requests (→ webfetch/curl), headless scraping without visuals, image analysis (→ vision-engine skill).
 
 ## 铁律
 
@@ -63,7 +63,7 @@ main().catch(e => { console.error(e); process.exit(1); });
 | Wait element | `page.waitForSelector(sel, { timeout: 10000 })` |
 | Screenshot | `page.screenshot({ path, fullPage: true })` |
 | Mobile | CDP `Emulation.setDeviceMetricsOverride` (not `newContext`) |
-| Screenshot analysis | Screenshot → use vision-analyzer skill |
+| Screenshot analysis | Screenshot → use vision-engine skill |
 | Chrome status | `curl -sf http://127.0.0.1:18800/json/version` |
 | Start Chrome | `chrome-agent start` |
 | Cleanup tabs | `chrome-agent cleanup` |
@@ -237,7 +237,7 @@ Anti-throttling flags don't help in Chrome 149+. Bring Chrome to foreground for 
 ## Templates & Reference
 
 - `templates/basic.ts` — minimal script with hard timeout + lastStep
-- `templates/screenshot.ts` — screenshot save + optional vision-analyzer integration
+- `templates/screenshot.ts` — screenshot save + optional vision-engine integration
 - `templates/interactions.ts` — mouse interactions: scroll, right-click, draw, drag-and-drop
 - `templates/touch-gestures.ts` — touch: tap, swipe, pinch-zoom (CDP mobile emulation)
 - `templates/mobile-emulate.ts` — CDP mobile device emulation

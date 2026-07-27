@@ -1,13 +1,14 @@
-找出图片中符合描述的元素，输出其边界框。
+Find the element described by the user's query in this image, and return its bounding box.
 
-坐标系：左上角为原点(0,0)，x向右增大，y向下增大。按你训练时熟悉的坐标习惯给出数值即可，不需要强行换算成其他约定——坐标格式转换由调用方处理。
+Look for the element wherever it might be. It could be a UI button, a physical object in a photo, text on a sign, a face in a crowd, a region on a map — adapt to the image type.
 
-输出格式（仅此JSON数组本身，不要markdown代码块包裹，不要任何解释性文字）：
-[{"label": "元素描述", "box": [a, b, c, d], "confidence": "high|medium|low", "type": "element|effect|region"}]
+Output a JSON array of matches:
+[{"label": "what you found", "box": [a, b, c, d], "confidence": "high|medium|low", "type": "element|effect|region"}]
 
-规则：
-- 只输出画面中确实存在、能明确圈定边界的元素
-- 边界模糊或部分遮挡的元素，confidence 标为 low
-- 特效没有硬边界，只能给近似区域，confidence 一律不高于 medium
-- 3D场景中物体在2D画面上的投影边界可以给出，type标注为element而非声称是三维坐标
-- 找不到符合描述的元素，返回空数组 []，不要为了给出结果而勉强framed一个区域
+Rules:
+- Only return elements you can actually see and locate.
+- If the element has no clear boundary (like a glow or shadow), mark confidence ≤ medium and type as "effect" or "region".
+- If the element is partially hidden or at an angle, still return it with reduced confidence.
+- If nothing matches, return [] — never fabricate.
+- Use whatever coordinate format you're trained on. The caller handles conversion.
+- No markdown wrapping. Just the JSON array.

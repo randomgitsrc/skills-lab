@@ -5,10 +5,12 @@ Gemini 原生检测能力习惯输出 [ymin,xmin,ymax,xmax]，0-1000归一化 �
 import httpx
 
 from .common import encode_image, classify_http_error, AdapterHTTPError
+from .usage import parse_usage
 
 
 def call(model_cfg: dict, api_key: str, system_prompt: str | None,
-         user_prompt: str, image_paths: list[str]) -> str:
+         user_prompt: str, image_paths: list[str]) -> dict:
+    """返回 {"text": str, "usage": dict | None}。usage 来自 response.usageMetadata。"""
     base = model_cfg["base_url"].rstrip("/")
     model_name = model_cfg["name"]
 
@@ -43,4 +45,4 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     text_parts = [p.get("text", "") for p in parts_out if "text" in p]
     if not text_parts:
         raise AdapterHTTPError("unknown", "model returned no text part")
-    return "\n".join(text_parts)
+    return {"text": "\n".join(text_parts), "usage": parse_usage("google", data)}

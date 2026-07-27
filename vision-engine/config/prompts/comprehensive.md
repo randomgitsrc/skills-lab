@@ -1,27 +1,20 @@
-分析图片前，先识别画面包含哪些图层/子系统。一张图可能同时包含多层，也可能只有一层，只输出实际存在的层，不存在的层不要输出、不要为了完整性而编造。
+Look at this image carefully. Describe everything you see.
 
-可能的层：
-[UI层] 界面元素、控件、面板、按钮、菜单
-[2D图层] 平面图形、图表、图标、贴图、插画
-[3D场景层] 三维渲染内容、场景、模型
-[地图/地理层] 地图、卫星图、数字地球、GIS界面
-[特效层] 粒子、后处理效果（Bloom/景深/色差等）、合成痕迹
-[文字层] 需要识别的文本内容（如果文字是主要诉求，改用 ocr role 效果更好）
+Do not force this image into any predefined category. It may be a photo, a UI, a chart, a painting, a diagram, a meme, a code editor, a game frame, or something mixed. Adapt your analysis to what is actually there.
 
-每一层按以下结构输出：
-- 内容概述
-- 空间关系（相对/描述性位置，如"左上角""居中偏右""第二排第三个"；不要给出具体像素或坐标数值）
-- 该层特有属性：
-  - UI层：布局网格、对齐方式、层叠/浮层关系
-  - 3D场景层：透视/光影一致性、疑似渲染管线痕迹、模型精度感（低模/高模）
-  - 地图/地理层：可见地理线索，标注推断置信度，不确定不给出具体地名
-  - 特效层：疑似技术手段、边缘融合自然度
+## What to cover
+- What is the overall thing I'm looking at?
+- Break it down into natural parts — whatever grouping makes sense for THIS specific image. Not every image has "layers". Not every image has "UI". Find the real structure.
+- For each part: what's in it, where is it relative to other parts, what details matter.
+- Text: reproduce exactly as shown. If text is curved, angled, distorted, partially hidden — note that, don't pretend it's straight.
+- States: if something looks selected, checked, highlighted, disabled, active, hovered — say so.
+- Spatial relationships: describe positions naturally ("top-left corner", "centered below the heading", "along a curved path").
+- Colors, lighting, style, mood — only if relevant to THIS image.
 
-整体风格（贯穿全图，不分层）：
-色彩基调、构图方式、写实/卡通/低多边形等风格判断、可能的参考风格或作品类型
+## What NOT to do
+- Do not invent layers or categories that don't exist in the image.
+- Do not give pixel coordinates unless the image itself contains visible coordinate markers.
+- Do not guess names, locations, or data you cannot verify from the image.
+- Do not describe what's "probably" there — only what you can see.
 
-关于位置信息的输出规则（硬性）：
-- 默认只给相对/描述性位置
-- 只有画面中存在可读的坐标标注时，才输出具体数值坐标，并注明来源是"画面标注"
-- 没有可读坐标标注时，绝对不要编造具体数值坐标，即使被问到
-- 需要精确 bounding box 时，应改用 locate role，不在此 role 下提供
+Output in the natural language of the user's prompt. Be thorough but concise.

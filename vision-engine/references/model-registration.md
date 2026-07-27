@@ -1,165 +1,191 @@
 # Model 注册指南
 
-> 这份文档**不是**SKILL.md的一部分,不会在"分析图片"这类正常调用skill的场景下被自动加载——
-> SKILL.md只在skill被触发时(即真的要分析一张图)才进上下文,而"给config加一个新model"是一次
-> **配置维护任务**,不是一次分析任务,skill机制不会主动把这份文档递给你。
+> 这份文档**不是**分析图片时需要的，是配置维护类内容。
+> SKILL.md 只在"分析图片"场景下加载，而"给 config 加新 model"是配置维护任务，
+> 需要主动打开本文件，不会自动加载。
 >
-> 换句话说：**这份文档是给正在编辑`config/vision-config.json`的人（或者被要求做这件事的agent）看的**，
-> 你需要主动打开它，不会有人自动帮你想起来读它。
+> 路由逻辑、alias/provider/name 身份识别、deprecated 处理 → 见 `references/model-routing.md`。
 
 ## 谁来注册一个新model？
 
-现状：**完全靠人工**。没有自动发现机制、没有"扫描一遍网络上有哪些新model自动加进来"这种东西。
-注册一个model就是打开`config/vision-config.json`，找到对应`providers`下的provider（没有就新建一个），
-往它的`models`数组里加一段JSON，存盘。可以是你自己手动改，也可以让某个agent（比如Claude Code）帮你改——
-但不管谁改，最终都是同一个动作：编辑这个文件。
+现状：**完全靠人工**。没有自动发现机制。注册一个 model 就是编辑 `config/vision-config.json`，
+找到对应 provider 的 `models` 数组加一段 JSON，存盘即生效。
 
 ## 一个新model该配哪些字段？
 
-**config按provider分组**，同一provider下的model共享`base_url`/`api_format`/`api_key_env`，只写一次：
+**config 按 provider 分组**，同一 provider 下的 model 共享 `base_url`/`api_format`/`api_key_env`：
 
 ```json
 "providers": {
-  "你的provider名（如openai/google/alibaba/self-hosted，自定义即可）": {
+  "你的provider名（自定义，如openai/google/alibaba/self-hosted）": {
     "base_url": "API端点",
-    "api_format": "anthropic | openai | google | omniparser（决定走哪个adapter，见下）",
+    "api_format": "anthropic | openai | google | omniparser（决定走哪个adapter）",
     "api_key_env": "环境变量名，没有key就填null",
     "models": [
       {
         "name": "model名字，同一provider下不能重复；不同provider下允许同名（身份识别用完整的provider/name）",
-        "alias": "可选，全局唯一的短名字，不能含'/'，--model/--verify-grounding/preferred_models都认",
+        "alias": "可选，全局唯一的短名字，不能含'/'",
         "capabilities": ["..."],
-        "coordinate_convention": "仅grounding/ui-grounding类model需要，见下",
+        "coordinate_convention": "仅grounding/ui-grounding类model需要",
         "priority": 1,
         "timeout": 60,
         "max_tokens": 4096,
-        "rpm_limit": 60
+        "quotas": [
+          {"metric": "requests", "window_seconds": 60,    "limit": 25,  "_note": "Tier1 RPM 截图实测"},
+          {"metric": "requests", "window_seconds": 86400, "limit": 250, "_note": "Tier1 RPD 截图实测"},
+          {"metric": "tokens",   "window_seconds": 60,    "limit": 2000000, "_note": "Tier1 TPM 截图实测"}
+        ],
+        "cooldown_seconds": 可选，收到429后冷却时长，默认60秒
       }
     ]
   }
 }
 ```
 
-**身份识别用`provider/name`复合ref，不是裸`name`**——`name`只需要在同一provider下不重复（加载时校验，
-重复直接拒绝），不同provider下完全可以同名。`--model`/`--verify-grounding`/`preferred_models`这些地方
-引用model时可以写完整的`provider/name`（如`google/gemini-3-pro`），也可以写`alias`（如果配了的话），
-只有在候选池里这个裸name唯一时才允许简写成裸name，跨provider重名时必须写全称或alias，否则报错拒绝而
-不是随便选一个。`provider`只用于`capability_provider_whitelist`校验，不单独参与身份识别（要跟`name`
-拼在一起才是完整身份）。
+model 条目里也可以覆盖同 provider 的共享字段（比如某个 model 走不同的 `base_url`），
+字段同名时 model 条目优先——但正常情况下不需要这么做。
 
-model条目里也可以覆盖同provider的共享字段（比如某个model走不同的`base_url`），字段同名时model
-条目优先——但正常情况下不需要这么做，同provider的model共享同一套连接参数是默认假设。
+## api_format 选择
 
-## `models`是资源清单，"该用哪个"挂在role底下
+只能是这四个值之一，对应 `scripts/adapters/` 下的四个 adapter：
 
-`providers.<id>.models`只负责回答"有哪些model、各自能干什么"，不承载任何"这次该选谁"的逻辑——那是
-role自己的事。role想要一份"快捷候选子集"，直接在role定义里写`preferred_models`：
+| api_format | adapter | 适用场景 |
+|---|---|---|
+| `anthropic` | `anthropic_api.py` | Claude、MiniMax 等走 Anthropic 格式的服务 |
+| `openai` | `openai_api.py` | GPT、Qwen 等走 OpenAI 兼容格式的服务；**自建服务（vLLM/Ollama/LM Studio）默认选这个** |
+| `google` | `google_api.py` | Gemini 原生格式（grounding 基准） |
+| `omniparser` | `omniparser_api.py` | OmniParser 本地 UI 检测服务 |
 
-```json
-"roles": {
-  "comprehensive": {
-    "preferred_models": ["sonnet", "gpt"],
-    ...
-  }
-}
-```
+如果你的 model 走完全不同的私有协议，需要新写 adapter 并在 `vision-analyze.py` 的
+`ADAPTER_BY_FORMAT` 字典里注册——这是唯一必须碰代码的情况。
 
-`preferred_models`里既可以写`alias`（上面例子的`sonnet`/`gpt`），也可以写完整`provider/name`——不需要
-一个独立于role之外的顶层结构，这是最初设计`scenarios`时走的弯路：`scenarios`需要一个额外的
-`--scenario NAME`命令行参数才能触发，而vision-engine大多数调用场景里根本没有一个天然存在的角色会去
-决定"这次该传哪个scenario名字"，导致这层配置写了也没人用。已移除，别再抄这个模式。
+## capabilities 注册表
 
-`api_format`只能是这四个值之一，因为目前只实现了这四个adapter（`scripts/adapters/`下对应的
-`anthropic_api.py`/`openai_api.py`/`google_api.py`/`omniparser_api.py`）。如果你的model走的是
-一套完全不同的私有协议，光改json解决不了，需要新写一个adapter文件并在`vision-analyze.py`的
-`ADAPTER_BY_FORMAT`字典里注册——这是唯一必须碰代码的情况。绝大多数情况（包括几乎所有自建的
-OpenAI兼容服务，如vLLM/Ollama/LM Studio）直接填`"openai"`就能用，不需要写代码。
-
-## capabilities 注册表 —— 到底该打哪些标签
-
-只有4个capability会真正影响路由（被某个role的`requires`用到）：
+只有 4 个 capability 会真正影响路由（被某个 role 的 `requires` 用到）：
 
 | capability | 含义 | 判断依据 |
 |---|---|---|
-| `general` | 能看图并做基础描述/分析 | 能接收图片输入、给出有意义描述，就该打——门槛最低，多数视觉模型都有 |
-| `ocr` | 文字提取**准确率**可靠 | 不是"能看图就行"，要求对密集文本/小字号/表格的识别准确率过关。没实测过准确率，先别打，宁可只给`general` |
-| `grounding` | 经专门训练、给出的像素级bbox坐标可信 | **门槛最高，最容易配错**。判断依据不是"model嘴上说自己能给坐标"（通用对话模型问了也会给，但是编的），而是provider官方文档/论文明确写了做过grounding/detection训练。**拿不准，用下面的`--verify-grounding`实测，别只信文档** |
-| `ui-grounding` | 专门的UI元素检测服务 | 只有OmniParser这类专用检测服务该打，通用视觉模型不该打，语义上是"只做UI元素枚举、不接受自然语言查询" |
+| `general` | 能看图并做基础描述/分析 | 能接收图片输入、给出有意义描述，就该打——门槛最低 |
+| `ocr` | 文字提取**准确率**可靠 | 不是"能看图就行"，要求密集文本/小字号/表格识别准确率过关。没实测过先别打 |
+| `grounding` | 经专门训练、像素级 bbox 坐标可信 | **门槛最高，最容易配错**。判断依据不是"model 说自己能给坐标"（通用模型问了也会给，但是编的），而是 provider 官方文档明确写了做过 grounding/detection 训练。**拿不准用 `--verify-grounding` 实测** |
+| `ui-grounding` | 专门的 UI 元素检测服务 | 只有 OmniParser 这类专用检测服务该打，通用视觉模型不该打 |
 
-**不影响路由的标签**（当前config里已清空，除非你先在`roles`里新增一个真正`requires`它的role，否则打了也是摆设）：
+**不影响路由的标签**（除非在 `roles` 里新增一个 `requires` 它的 role，否则打了也是摆设）：
 `data`、`style`、`spatial-relative`。
 
-**加了新model或改了capabilities，CLI下次启动会自动做两项静态校验**（不阻断，只警告，见stderr）：
-- 死标签：某model声明了某capability，但没有role要求它
-- 不可满足：某role要求了某capability，但没有model声明它，这个role会永远选不到候选
+加了新 model 或改了 capabilities，CLI 下次启动会自动做两项静态校验（不阻断，只警告，见 stderr）：
+- 死标签：某 model 声明了某 capability，但没有 role 要求它
+- 不可满足：某 role 要求了某 capability，但没有 model 声明它
 
-**校验能发现"标签有没有被用到"，发现不了"标签打得准不准"**——这是下一节要解决的问题。
+校验能发现"标签有没有被用到"，发现不了"标签打得准不准"——用 `--verify-grounding` 实测。
 
-## `grounding`标签该不该打——别只信文档，用实测
-
-之前唯一的判断依据是"相信provider文档"，太弱。现在有个内置的实测工具：
+## `grounding` 标签该不该打——别只信文档，用实测
 
 ```bash
 scripts/vision-analyze.py --verify-grounding MODEL_NAME --config config/vision-config.json
 ```
 
-它会：
-1. 用内置探测图（`scripts/fixtures/grounding-probe.png`，一张1000x1000白底图，中央有一个位置已知的红色矩形）
-2. 直接调用你指定的model，问它"找出红色矩形"
-3. 把返回的bbox和ground truth（`scripts/fixtures/grounding-probe-truth.json`）计算IoU（交并比）
-4. IoU≥0.5 判定"有实测证据支持打grounding标签"，否则给出"不建议打"的结论
+用内置探测图（`scripts/fixtures/grounding-probe.png`，1000x1000 白底图，中央有一个位置已知的红色矩形）
+直接调用指定 model，问它"找出红色矩形"，把返回的 bbox 和 ground truth 计算 IoU（交并比）。
+IoU≥0.5 判定"有实测证据支持打 grounding 标签"。
 
-输出示例：
-```json
-{
-  "status": "completed",
-  "model": "gemini-3-pro",
-  "best_iou": 0.87,
-  "recommendation": "IoU=0.87（阈值0.5），达标。有实测证据支持给'gemini-3-pro'打grounding标签。"
-}
+**能力边界**：单张探测图表现好不代表真实复杂场景也一样准，正式启用前建议再用真实场景图人工抽查。
+IoU 阈值 0.5 是经验值，精度要求高的场景自己核对 `best_iou` 具体数值。
+
+## UI 检测类 model 该配 `grounding` 还是 `ui-grounding`
+
+区分标准不是"擅不擅长 UI"，而是**交互接口是 targeted 还是 enumerate**：
+
+- **targeted**（给描述，返回对应元素坐标）→ 配 `grounding`，走 `locate` role。UI-TARS 属于这类。
+- **enumerate**（不接受查询，一次性吐出全部元素）→ 配 `ui-grounding`，走 `locate-ui` role。OmniParser 属于这类。
+
+配错后果：targeted 接口的 model 硬配成 `ui-grounding`，`locate-ui` 的 `enumerate_then_filter` 逻辑
+会拿到不符合预期的响应格式，本地过滤失效或报错。
+
+## 通用 quota 框架（`quotas` 字段）
+
+每个 model 通过 `quotas` 数组配置任意 (metric, window, limit) 组合，不在代码里 hardcode 三种固定类型。
+本地限流（不依赖服务端响应），目的是在多并发/频繁调用场景下不浪费请求额度。
+数据存在 `~/.local/share/vision-engine/ratelimit/{metric}-{window}s-{model_name}.json`，flock 保护。
+
+### quotas 条目结构
+
+| 字段 | 含义 | 示例 |
+|------|------|------|
+| `metric` | `"requests"`（请求次数）或 `"tokens"`（token 数） | `"requests"` |
+| `window_seconds` | 滑动窗口（秒），任意正整数 | `60` / `86400` / `3600` |
+| `limit` | 窗口内上限 | `25` / `2000000` |
+| `_note` | 自由文本，写实测依据（截图日期/provider文档链接） | `"Tier1 RPM 截图实测"` |
+
+### 数据 schema
+
+```
+requests metric → {"timestamps": [ts1, ts2, ...]}
+tokens metric   → {"entries": [[ts, n], [ts, n], ...]}
 ```
 
-**这个工具的能力边界，别过度信任**：
-- 单张探测图上表现好，不代表真实复杂场景（遮挡、密集元素、非规则形状）也一样准，正式启用前建议再用真实场景图人工抽查几次。
-- IoU阈值0.5是经验值，不是理论最优——如果你的场景对精度要求特别高（比如自动化点击必须命中），可以把判断标准提高，自己核对`best_iou`的具体数值而不是只看`recommendation`这一句话结论。
-- 这个工具验证的是"这个model至少不是在瞎编坐标"，不是"这个model在所有任务上都够用"。
+- `check_quota` 是 dry-run（不写文件），检查累计值是否 ≥ limit
+- `record_usage` 在响应成功后调用，精确记账
+- 失败调用（429/timeout/5xx）不调 record_usage，不计入
 
-## UI检测类model该配`grounding`还是`ui-grounding`——按交互模式判断，不是按"能不能看UI"
+### 示例配置
 
-这条是2026年7月接入UI-TARS时才发现的坑，记下来避免以后重复踩：`grounding`和`ui-grounding`的区分标准不是"这个model擅不擅长UI"，而是**它的交互接口是"targeted"还是"enumerate"**：
+```json
+"quotas": [
+  {"metric": "requests", "window_seconds": 60,    "limit": 25},
+  {"metric": "requests", "window_seconds": 86400, "limit": 250},
+  {"metric": "tokens",   "window_seconds": 60,    "limit": 2000000}
+]
+```
 
-- **targeted**（给一段描述，返回对应元素坐标）——配`grounding`，走`locate` role。UI-TARS属于这类，即使它专门训练来做UI任务，接口形态还是"回答一个查询"，跟Gemini/Qwen-VL的grounding调用方式是同一套。
-- **enumerate**（不接受查询，一次性吐出画面里全部元素）——配`ui-grounding`，走`locate-ui` role。OmniParser属于这类。
+### Token 准确统计
 
-配错的后果：如果把一个targeted接口的model硬配成`ui-grounding`，`locate-ui`的`enumerate_then_filter`逻辑会拿到一个不符合预期的响应格式（它期待"全部元素列表"，实际收到的是"一个查询的回答"），本地过滤逻辑会失效或者报错，而不是给出合理提示。加新model前先看它的API文档到底是"问答式"还是"全量扫描式"，再决定配哪个能力标签。
+每个 adapter 从 provider 响应中提取 `usage` 字段，归一化为 `{"input_tokens", "output_tokens", "total_tokens"}`：
+
+| api_format | 数据来源 | 字段名 |
+|-----------|---------|--------|
+| `google` | `usageMetadata` | `promptTokenCount` / `candidatesTokenCount` / `totalTokenCount` |
+| `openai` | `usage` | `prompt_tokens` / `completion_tokens` / `total_tokens` |
+| `anthropic` | `usage` | `input_tokens` / `output_tokens`（自行求和 total） |
+| `omniparser` | 无 | 无 token 概念，返回 None |
+
+- 响应成功 → 日志记 `tokens_in` / `tokens_out` / `usage_source: "api"`
+- 响应缺 usage 字段 → 用 `max_tokens` 保守估计，日志记 `usage_source: None`
+- Token 计数在 `record_usage` 中按 `tokens` metric 的 quota 窗口累加
+
+### 429 cooldown
+
+**429 冷却仅在 `kind == "quota_exceeded"` 时触发**——其他错误（auth_error / server_error / timeout）
+不会设冷却。`cooldown_seconds` 字段可以配置，默认 60 秒。
+
+**`--self-test` 和 `--verify-grounding` 不受限流**——这两个是诊断命令。
+
+### 实测依据
+
+每个 model 的 `quotas` 条目都应该来自实际测量（Google AI Studio rate limit 页面、并发请求测出实际 429 阈值等），
+截图保存到项目目录，在 `_note` 字段里写"YYYY-MM-DD 实测"以便日后审计。
 
 ## role 字段完整说明
 
 | 字段 | 含义 |
 |---|---|
-| `system_prompt` | 直接写在config里的短prompt(inline) |
-| `system_prompt_file` | 指向`.md`文件的相对路径（相对config.json所在目录），加载时读入`system_prompt`，**不能跟`system_prompt`同时填**，两者都配会报错拒绝 |
-| `requires` | 该role需要model具备的`capabilities`，驱动动态候选池筛选 |
-| `output_schema` | `text`或`bbox_list`，决定走文本流程还是bbox容错提取+校验流程 |
-| `default` | 标记默认role（不指定`-r`时用它） |
-| `multi_image` | 是否需要两张图（`compare`用，要求必须传`-i2`） |
-| `query_mode` | `targeted`（给描述找元素）或`enumerate_then_filter`（枚举全部再本地过滤），决定`-p`的语义 |
-| `skip_context` | 是否忽略`-c`参数（`quick`用） |
-| `preferred_models` | 该role的定向model偏好（软性排序，可写`provider/name`或`alias`） |
+| `system_prompt` | 直接写在 config 里的短 prompt (inline) |
+| `system_prompt_file` | 指向 `.md` 文件的相对路径（相对 config.json 所在目录），加载时读入 `system_prompt`，**不能跟 `system_prompt` 同时填** |
+| `requires` | 该 role 需要 model 具备的 `capabilities`，驱动动态候选池筛选 |
+| `output_schema` | `text` 或 `bbox_list`，决定走文本流程还是 bbox 容错提取+校验流程 |
+| `default` | 标记默认 role（不指定 `-r` 时用它） |
+| `multi_image` | 是否需要两张图（`compare` 用，要求必须传 `-i2`） |
+| `query_mode` | `targeted`（给描述找元素）或 `enumerate_then_filter`（枚举全部再本地过滤），决定 `-p` 的语义 |
+| `skip_context` | 是否忽略 `-c` 参数（`quick` 用） |
+| `preferred_models` | 该 role 的定向 model 偏好（软性排序，可写 `provider/name` 或 `alias`） |
 
-**长prompt建议外置成文件**：inline字符串编辑麻烦（转义换行、没高亮、git diff一坨），超过几行就该拆成
-`config/prompts/<role>.md`，config里改成：
-```json
-{"system_prompt": null, "system_prompt_file": "prompts/comprehensive.md"}
-```
-`comprehensive`和`locate`两个role已经是这么做的，可以照着抄。
+长 prompt 建议外置成文件：inline 字符串编辑麻烦，超过几行就拆成 `config/prompts/<role>.md`，
+config 里改成 `{"system_prompt": null, "system_prompt_file": "prompts/comprehensive.md"}`。
 
-## 小结：新model注册的完整流程
+## 小结：新 model 注册的完整流程
 
-
-
-1. 确认`api_format`是否已有对应adapter（四选一，或者自己写一个新的）
-2. 先只打`general`（如果它能看图），别急着打`grounding`
-3. 如果确实需要grounding能力，先跑`--verify-grounding`拿实测IoU再决定要不要打标签
-4. 编辑`vision-config.json`加进对应provider的`models`数组（没有这个provider就新建一个），存盘即生效，不需要重启/编译任何东西
-5. 跑一次任意role确认没有触发死标签/不可满足/重名警告（stderr里看）
+1. 确认 `api_format` 是否已有对应 adapter（四选一，或者自己写一个新的）
+2. 先只打 `general`（如果它能看图），别急着打 `grounding`
+3. 如果确实需要 grounding 能力，先跑 `--verify-grounding` 拿实测 IoU 再决定要不要打标签
+4. 编辑 `vision-config.json` 加进对应 provider 的 `models` 数组（没有这个 provider 就新建一个），存盘即生效
+5. 跑一次任意 role 确认没有触发死标签/不可满足/重名警告（stderr 里看）

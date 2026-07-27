@@ -7,6 +7,7 @@ from pathlib import Path
 ALLOWED_FIELDS = {
     "ts", "role", "model", "provider", "status", "latency_ms",
     "image", "tokens_in", "tokens_out", "dropped_count", "error_kind",
+    "attempts", "usage_source",
 }
 
 

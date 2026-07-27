@@ -38,11 +38,11 @@
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
         "gemini-flash-free",
+        "gemini-flash",
         "qwen3.7-plus",
         "qwen3-vl-plus",
         "gemini-lite-free",
-        "gemini",
-        "gemini-flash"
+        "gemini"
       ]
     },
     "ocr": {
@@ -54,11 +54,11 @@
       "system_prompt_file": "prompts/ocr.md",
       "preferred_models": [
         "gemini-flash-free",
-        "gemini-lite-free",
         "qwen3.7-plus",
+        "qwen3-vl-plus",
         "gemini-flash",
-        "gemini-lite",
-        "gemini"
+        "gemini",
+        "doubao-lite"
       ]
     },
     "code": {
@@ -70,11 +70,10 @@
       "system_prompt_file": "prompts/code.md",
       "preferred_models": [
         "gemini-flash-free",
-        "gemini-lite-free",
         "qwen3.7-plus",
         "gemini-flash",
-        "gemini-lite",
-        "gemini"
+        "gemini",
+        "doubao-lite"
       ]
     },
     "compare": {
@@ -87,11 +86,11 @@
       "system_prompt_file": "prompts/compare.md",
       "preferred_models": [
         "gemini-flash-free",
+        "gemini-flash",
         "qwen3.7-plus",
         "qwen3-vl-plus",
         "gemini-lite-free",
-        "gemini",
-        "gemini-flash"
+        "gemini"
       ]
     },
     "locate": {
@@ -510,32 +509,6 @@
               "window_seconds": 60,
               "limit": 30,
               "_note": "Aliyun 百炼默认"
-            }
-          ]
-        }
-      ]
-    },
-    "xfmass": {
-      "base_url": "https://maas-api.cn-huabei-1.xf-yun.com/v2",
-      "api_format": "openai",
-      "api_key_env": "XFMASS_DEFAULT_API_KEY",
-      "models": [
-        {
-          "name": "xoppaddleocrv16",
-          "capabilities": [
-            "ocr"
-          ],
-          "priority": 6,
-          "timeout": 60,
-          "max_tokens": 4096,
-          "alias": "paddleocr-vl",
-          "_note": "讯飞星辰托管，OCR专用；name必须是API接受的modelID(xoppaddleocrv16)，不是显示名",
-          "quotas": [
-            {
-              "metric": "requests",
-              "window_seconds": 60,
-              "limit": 30,
-              "_note": "讯飞星辰默认"
             }
           ]
         }

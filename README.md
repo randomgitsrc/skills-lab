@@ -19,7 +19,8 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 | Skill | Purpose |
 |-------|---------|
 | `playwright-cdp` | Chrome CDP browser automation via Playwright |
-| `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script |
+| `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script (deprecated — use vision-engine) |
+| `vision-engine` | Unified vision analysis: multi-model routing, bounding box, structured JSON output |
 | `skill-reviewer` | Systematic skill quality evaluation framework |
 | `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
 
@@ -50,7 +51,16 @@ NODE_PATH=$(npm root -g) npx tsx script.ts
 
 Playwright is a global install. Connect via CDP at `127.0.0.1:18800` — never `chromium.launch()`.
 
-## Vision Analyzer CLI
+## Vision Engine CLI
+
+```bash
+pip install -r vision-engine/scripts/requirements.txt
+python vision-engine/scripts/vision-analyze.py -i /tmp/screenshot.png -p "描述"
+```
+
+Config in `vision-engine/config/vision-config.json`. Supports multiple vision providers with automatic fallback.
+
+## Vision Analyzer CLI (deprecated)
 
 Requires `.env` with:
 

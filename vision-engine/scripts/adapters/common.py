@@ -1,6 +1,7 @@
-"""公共工具：图片编码、mimetype 推断、HTTP 请求封装。"""
+"""公共工具：图片编码、mimetype 推断、HTTP 请求封装、endpoint 不可达缓存。"""
 import base64
 import mimetypes
+import time
 from pathlib import Path
 
 import httpx
@@ -45,18 +46,24 @@ def image_dimensions(image_path: str) -> tuple[int, int]:
 
 
 class AdapterHTTPError(RuntimeError):
-    """封装HTTP层错误，调用方据此归类 quota_exceeded/timeout/auth_error/server_error，
-    并且这里不回显 headers 或 key（§3.1 报错脱敏要求）。"""
+    """封装HTTP层错误，调用方据此归类，不回显 headers 或 key（§3.1 报错脱敏要求）。"""
 
     def __init__(self, kind: str, message: str, status_code: int | None = None):
-        self.kind = kind  # quota_exceeded | timeout | auth_error | server_error | image_too_large | unknown
+        self.kind = kind  # quota_exceeded | timeout | connect_timeout | network_error | auth_error | server_error | image_too_large | unknown
         self.status_code = status_code
         super().__init__(message)
 
 
 def classify_http_error(exc: Exception) -> "AdapterHTTPError":
+    # 检查顺序：ConnectTimeout → TimeoutException → ConnectError
+    # ConnectTimeout 必须先于 TimeoutException 检查，才能区分"握手超时"和"响应超时"；
+    # ConnectError 与 TimeoutException 是独立的继承分支，互不包含
+    if isinstance(exc, httpx.ConnectTimeout):
+        return AdapterHTTPError("connect_timeout", "connection timed out (network may be unreachable)")
     if isinstance(exc, httpx.TimeoutException):
         return AdapterHTTPError("timeout", "request timed out")
+    if isinstance(exc, httpx.ConnectError):
+        return AdapterHTTPError("network_error", "network unreachable or DNS failure")
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         if code == 429:
@@ -69,3 +76,36 @@ def classify_http_error(exc: Exception) -> "AdapterHTTPError":
             return AdapterHTTPError("server_error", f"provider server error {code}", code)
         return AdapterHTTPError("unknown", f"http error {code}", code)
     return AdapterHTTPError("unknown", str(exc))
+
+
+DEFAULT_CONNECT_TIMEOUT = 5
+
+
+def make_timeout(model_cfg: dict) -> httpx.Timeout:
+    """从 model 配置构建 httpx.Timeout，connect 阶段用短超时快速检测不可达。"""
+    total = model_cfg.get("timeout", 60)
+    connect = model_cfg.get("connect_timeout", DEFAULT_CONNECT_TIMEOUT)
+    return httpx.Timeout(timeout=total, connect=connect)
+
+
+_ENDPOINT_UNREACHABLE: dict[str, float] = {}
+DEFAULT_ENDPOINT_UNREACHABLE_TTL = 300
+
+
+def mark_endpoint_unreachable(base_url: str, ttl: float = DEFAULT_ENDPOINT_UNREACHABLE_TTL):
+    _ENDPOINT_UNREACHABLE[base_url] = time.monotonic() + ttl
+
+
+def is_endpoint_unreachable(base_url: str) -> bool:
+    deadline = _ENDPOINT_UNREACHABLE.get(base_url)
+    if deadline is None:
+        return False
+    if time.monotonic() < deadline:
+        return True
+    del _ENDPOINT_UNREACHABLE[base_url]
+    return False
+
+
+def clear_endpoint_cache():
+    """清除全部 endpoint 不可达缓存（--clear-quotas 和 self-test 调用）。"""
+    _ENDPOINT_UNREACHABLE.clear()

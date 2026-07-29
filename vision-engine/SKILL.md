@@ -109,10 +109,11 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
 --verify-grounding MODEL_NAME
                  用内置探测图实测某model的grounding准确度(IoU)，配置维护用途，
                  详见 references/models.md，指定后忽略-i/-r等参数
---self-test     遍历config里配了key的全部model，各发一次最小化探测请求，汇总存活/失效报告，
-                 忽略-i/-r等参数。ui-grounding类model走健康检查而非chat探测
+--self-test     遍历config里配了key的全部model，各发一次最小化探测请求，汇总存活/失效/不可达报告，
+                  忽略-i/-r等参数。ui-grounding类model走健康检查而非chat探测。
+                  network_error/connect_timeout显示为unreachable（区别于dead）
 --clear-quotas  清除本地quota限流数据（~/.local/share/vision-engine/ratelimit/），
-                 不发任何网络请求，下次调用自动重建
+                  同时清除endpoint不可达缓存。不发任何网络请求，下次调用自动重建
 --no-cache      跳过缓存
 
 退出码:
@@ -139,6 +140,11 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
   不会因为个别条目有问题就整体判定失败换模型，`attempts`里会记录`dropped_count`。
 - `locate-ui`已支持多模型fallback（逐个尝试ui-grounding候选：Google Flash、Qwen等），
   不再局限于单个模型。
+- **endpoint 级不可达缓存**：当某 base_url 出现 `network_error`（DNS失败/连接被拒）或
+  `connect_timeout`（TCP握手超时）时，该 base_url 下所有模型在 5 分钟内被跳过
+ （status: `endpoint_unreachable`），避免同 endpoint 多模型逐个等待。
+  `ReadTimeout` 不触发此缓存（服务端可达只是慢）。`--self-test` 自动绕过此缓存；
+  `--clear-quotas` 同时清除。
 
 ## Red Flags — Rationalization Table
 
@@ -163,7 +169,8 @@ scripts/vision-analyze.py -i IMAGE [-i2 IMAGE2] [-r ROLE] [-p PROMPT] [-c CONTEX
 | exit 5, bbox全部非法 | 换用`comprehensive`看模型原始输出是否偏离了坐标格式约定，必要时检查`coordinate_convention`配置 |
 | .env权限/gitignore警告 | 按提示`chmod 600 .env`，并在`.gitignore`里加一行`.env` |
 | 结果里`dropped_count`较大 | 说明grounding模型本次返回中有较多条目坐标越界/字段缺失，被部分丢弃，属正常容错行为 |
-| 限流数据残留 | 使用 `--clear-quotas` 一键清除本地限流计数（仅在调试验证时使用，正常无需操作） |
+| 限流数据残留 | 使用 `--clear-quotas` 一键清除本地限流计数+endpoint缓存（仅在调试验证时使用，正常无需操作） |
+| `endpoint_unreachable` | 该base_url之前连接失败被缓存，5分钟内跳过；用 `--self-test` 实测当前网络状态，或 `--clear-quotas` 清除缓存 |
 
 ## 目录结构
 

@@ -5,6 +5,7 @@ What counts as an "element" depends on the image type. For a UI: buttons, inputs
 For each element, return:
 - label: what it is
 - type: what kind (button, icon, person, tree, bar, axis, etc.)
-- bbox: [x1, y1, x2, y2] in pixels, with (0,0) at top-left
+- box: bounding box coordinates
 
 Output as a compact JSON array. No markdown, no explanation.
+Use whatever coordinate format you're trained on. The caller handles conversion.

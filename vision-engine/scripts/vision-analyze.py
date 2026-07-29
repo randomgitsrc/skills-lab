@@ -40,7 +40,7 @@ import env_security        # noqa: E402
 import logger as logger_mod  # noqa: E402
 import ratelimit           # noqa: E402
 from adapters import anthropic_api, openai_api, google_api, omniparser_api  # noqa: E402
-from adapters.common import AdapterHTTPError, image_dimensions  # noqa: E402
+from adapters.common import AdapterHTTPError, image_dimensions, is_endpoint_unreachable, mark_endpoint_unreachable, clear_endpoint_cache  # noqa: E402
 
 DEFAULT_CONFIG_PATH = SCRIPT_DIR.parent / "config" / "vision-config.json"
 SUPPORTED_SCHEMA_VERSIONS = {"4.0"}
@@ -52,7 +52,7 @@ def _is_rate_limit_status(status: str) -> bool:
     return status == "cooldown" or status.startswith("quota_exceeded:")
 
 # provider级别的共享字段：在providers[provider_id]下声明一次，model条目可以覆盖同名字段
-PROVIDER_LEVEL_FIELDS = ("base_url", "api_format", "api_key_env")
+PROVIDER_LEVEL_FIELDS = ("base_url", "api_format", "api_key_env", "connect_timeout")
 
 
 def model_ref(model: dict) -> str:
@@ -324,22 +324,28 @@ def run_text_role(config: dict, role_name: str, role: dict, user_prompt: str,
             attempts.append({"model": ref, "status": quota_blocked})
             continue
 
+        # 3. endpoint 级不可达检查（同 base_url 的模型共享网络路径）
+        if is_endpoint_unreachable(model["base_url"]):
+            attempts.append({"model": ref, "status": "endpoint_unreachable"})
+            continue
+
         api_key = env_security.resolve_key(model.get("api_key_env"))
         t0 = time.time()
         try:
             result_obj = call_model(model, api_key, role.get("system_prompt"), user_prompt, image_paths,
                                     role_max_tokens=role.get("max_tokens"))
         except AdapterHTTPError as e:
-            # 429/quota_exceeded 触发冷却
+            if e.kind in ("network_error", "connect_timeout"):
+                mark_endpoint_unreachable(model["base_url"])
             if e.kind == "quota_exceeded":
-                ratelimit.set_cooldown(sanitized, model.get("cooldown_seconds", 60))
+                _handle_429(model, sanitized)
             attempts.append({"model": ref, "status": e.kind, "error": str(e)})
             continue
         latency_ms = int((time.time() - t0) * 1000)
         text = result_obj["text"]
         usage = result_obj.get("usage")
 
-        # 3. 响应成功：精确记录 token / request 消耗
+        # 4. 响应成功：精确记录 token / request 消耗
         for quota in model.get("quotas", []):
             if quota["metric"] == "requests":
                 ratelimit.record_usage(sanitized, quota, 1, _now=time.time())
@@ -379,6 +385,11 @@ def _check_model_quotas(model: dict, sanitized: str) -> str | None:
             window = quota["window_seconds"]
             return f"quota_exceeded:{metric}:{window}s"
     return None
+def _handle_429(model: dict, sanitized: str):
+    """429 触发时的统一处理：set cooldown + fill quota to limit."""
+    ratelimit.set_cooldown(sanitized, model.get("cooldown_seconds", 60))
+    for quota in model.get("quotas", []):
+        ratelimit.fill_quota_to_limit(sanitized, quota, _now=time.time())
 
 
 # ────────────────────────── bbox_list 类 role (locate) 的 fallback 主循环 ──────────────────────────
@@ -420,14 +431,21 @@ def run_locate_role(config: dict, role_name: str, role: dict, user_prompt: str,
             attempts.append({"model": ref, "status": quota_blocked})
             continue
 
+        # 3. endpoint 级不可达检查
+        if is_endpoint_unreachable(model["base_url"]):
+            attempts.append({"model": ref, "status": "endpoint_unreachable"})
+            continue
+
         api_key = env_security.resolve_key(model.get("api_key_env"))
         t0 = time.time()
         try:
             result_obj = call_model(model, api_key, role.get("system_prompt"), user_prompt, [image_path],
                                     role_max_tokens=role.get("max_tokens"))
         except AdapterHTTPError as e:
+            if e.kind in ("network_error", "connect_timeout"):
+                mark_endpoint_unreachable(model["base_url"])
             if e.kind == "quota_exceeded":
-                ratelimit.set_cooldown(sanitized, model.get("cooldown_seconds", 60))
+                _handle_429(model, sanitized)
             attempts.append({"model": ref, "status": e.kind, "error": str(e)})
             continue
         latency_ms = int((time.time() - t0) * 1000)
@@ -518,27 +536,45 @@ def _parse_llm_ui_elements(raw_text: str, convention: str, width: int, height: i
     return converted
 
 
-def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: str) -> dict:
-    ui_models = [m for m in config["models"] if "ui-grounding" in m.get("capabilities", [])]
-    if not ui_models:
-        return {"status": "error", "reason": "no_ui_grounding_model_configured", "attempts": []}
+def run_locate_ui_role(config: dict, role_name: str, role: dict, query: str | None,
+                       image_path: str, verbose: bool, forced_model: str | None = None) -> dict:
+    candidates = select_candidates(config, role)
 
-    # Sort by priority; cooldown/quota checks filter below
-    candidates = sorted(ui_models, key=lambda m: m.get("priority", 999))
+    if forced_model:
+        match, err = resolve_forced_model(candidates, forced_model)
+        if match is None:
+            return {"status": "error", "reason": "forced_model_not_eligible",
+                     "detail": err or f"'{forced_model}' 不在此role的candidates中"
+                                f"(可能不满足capability要求，或config里不存在该model)", "attempts": []}
+        candidates = [match]
+
+    candidates, unavailable = env_security.precheck_key_existence(candidates)
+    if verbose and unavailable:
+        print(f"[verbose] skipping models without key: {unavailable}", file=sys.stderr)
+
+    if not candidates:
+        return {"status": "error", "reason": "no_available_model", "attempts": []}
+
     width, height = image_dimensions(image_path)
     attempts = []
+    converted = None
+    success_model = None
 
     for model in candidates:
         ref = model_ref(model)
         sanitized = _sanitize_ref_for_filename(ref)
 
-        # Cooldown + quota checks (same as text/locate roles)
         if ratelimit.is_cooled_down(sanitized):
             attempts.append({"model": ref, "status": "cooldown"})
             continue
         quota_blocked = _check_model_quotas(model, sanitized)
         if quota_blocked is not None:
             attempts.append({"model": ref, "status": quota_blocked})
+            continue
+
+        # endpoint 级不可达检查（OmniParser 和 LLM 路径共享 base_url）
+        if is_endpoint_unreachable(model["base_url"]):
+            attempts.append({"model": ref, "status": "endpoint_unreachable"})
             continue
 
         # OmniParser 路径
@@ -550,11 +586,16 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
             try:
                 raw_elements = omniparser_api.detect(model, image_path)
             except AdapterHTTPError as e:
+                if e.kind in ("network_error", "connect_timeout"):
+                    mark_endpoint_unreachable(model["base_url"])
                 attempts.append({"model": ref, "status": e.kind, "error": str(e)})
                 continue
             latency_ms = int((time.time() - t0) * 1000)
             convention = model.get("coordinate_convention", "omniparser_pixel")
             converted = _convert_omni_elements(raw_elements, convention, width, height)
+            for quota in model.get("quotas", []):
+                if quota["metric"] == "requests":
+                    ratelimit.record_usage(sanitized, quota, 1, _now=time.time())
 
         # LLM 路径
         else:
@@ -563,7 +604,6 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
                 attempts.append({"model": ref, "status": "skipped_no_key"})
                 continue
             user_prompt = f"Find elements: {query}" if query else "Enumerate all interactive elements"
-            # locate-ui 枚举输出量大，LLM 响应慢；至少 120s
             original_timeout = model.get("timeout")
             if original_timeout and original_timeout < 120:
                 model["timeout"] = 120
@@ -571,6 +611,8 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
             try:
                 result_obj = call_model(model, api_key, role.get("system_prompt"), user_prompt, [image_path])
             except AdapterHTTPError as e:
+                if e.kind in ("network_error", "connect_timeout"):
+                    mark_endpoint_unreachable(model["base_url"])
                 if e.kind == "quota_exceeded":
                     ratelimit.set_cooldown(sanitized, model.get("cooldown_seconds", 60))
                 attempts.append({"model": ref, "status": e.kind, "error": str(e)})
@@ -581,7 +623,6 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
             latency_ms = int((time.time() - t0) * 1000)
             convention = model.get("coordinate_convention", "gemini_1000")
             converted = _parse_llm_ui_elements(result_obj["text"], convention, width, height)
-            # Record usage for successful calls
             usage = result_obj.get("usage")
             for quota in model.get("quotas", []):
                 if quota["metric"] == "requests":
@@ -592,10 +633,14 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
                     ratelimit.record_usage(sanitized, quota, min(model.get("max_tokens") or 4096, 512), _now=time.time())
 
         attempts.append({"model": ref, "status": "success", "latency_ms": latency_ms})
-        break  # Success — don't try remaining candidates
+        if verbose and model.get("deprecated"):
+            note = model.get("deprecated_note", "")
+            print(f"[verbose] 使用了标记为deprecated的model '{ref}'"
+                  f"{('：' + note) if note else ''}，建议尽快迁移到替代model", file=sys.stderr)
+        success_model = model
+        break
 
-    else:
-        # All candidates exhausted without success
+    if converted is None or success_model is None:
         return {"status": "error", "reason": "all_models_failed", "attempts": attempts}
 
     total = len(converted)
@@ -608,16 +653,16 @@ def run_locate_ui_role(config: dict, role: dict, query: str | None, image_path: 
         if matched:
             result = matched
         else:
-            result = converted  # 匹配不到时返回全部，附加提示，而不是静默返回空数组
+            result = converted
             note = (f"未找到与查询词'{query}'精确匹配的元素，以下是画面检测到的全部{total}个元素，"
                     f"请勿将此误判为'该元素不存在'")
 
     response = {
-        "status": "success", "model_used": model_ref(model), "provider": model["provider"],
+        "status": "success", "model_used": model_ref(success_model), "provider": success_model["provider"],
         "query_mode": "enumerate_then_filter", "matched_query": query,
         "filter_matched": bool(matched) if query else None,
         "total_elements_detected": total, "result": result,
-        "attempts": [{"model": model_ref(model), "status": "success", "latency_ms": latency_ms}],
+        "attempts": attempts,
     }
     if note:
         response["note"] = note
@@ -635,6 +680,8 @@ def run_self_test(config: dict) -> dict:
     if not SELF_TEST_PROBE_IMAGE.is_file():
         return {"status": "error", "reason": "fixture_missing",
                 "detail": "探测图缺失，检查scripts/fixtures/self-test-probe.png"}
+
+    clear_endpoint_cache()
 
     results = []
     for model in config["models"]:
@@ -657,11 +704,23 @@ def run_self_test(config: dict) -> dict:
         api_key = env_security.resolve_key(api_key_env)
         t0 = time.time()
         try:
-            call_model(model, api_key, None, SELF_TEST_PROMPT, [str(SELF_TEST_PROBE_IMAGE)])
+            result_obj = call_model(model, api_key, None, SELF_TEST_PROMPT, [str(SELF_TEST_PROBE_IMAGE)])
             entry["status"] = "alive"
             entry["latency_ms"] = int((time.time() - t0) * 1000)
+            sanitized = _sanitize_ref_for_filename(model_ref(model))
+            usage = result_obj.get("usage")
+            for quota in model.get("quotas", []):
+                if quota["metric"] == "requests":
+                    ratelimit.record_usage(sanitized, quota, 1, _now=time.time())
+                elif quota["metric"] == "tokens" and usage is not None:
+                    ratelimit.record_usage(sanitized, quota, usage["total_tokens"], _now=time.time())
+                elif quota["metric"] == "tokens" and usage is None:
+                    ratelimit.record_usage(sanitized, quota, min(model.get("max_tokens") or 4096, 512), _now=time.time())
         except AdapterHTTPError as e:
-            entry["status"] = "dead"
+            if e.kind in ("network_error", "connect_timeout"):
+                entry["status"] = "unreachable"
+            else:
+                entry["status"] = "dead"
             entry["error_kind"] = e.kind
             entry["detail"] = str(e)
         entry["method"] = "chat_probe"
@@ -671,12 +730,14 @@ def run_self_test(config: dict) -> dict:
 
     alive_count = sum(1 for r in results if r["status"] == "alive")
     dead_count = sum(1 for r in results if r["status"] == "dead")
-    tested_count = alive_count + dead_count
+    unreachable_count = sum(1 for r in results if r["status"] == "unreachable")
+    tested_count = alive_count + dead_count + unreachable_count
 
     return {
         "status": "completed",
         "summary": {"total": len(results), "tested": tested_count,
                     "alive": alive_count, "dead": dead_count,
+                    "unreachable": unreachable_count,
                     "skipped_no_key": len(results) - tested_count},
         "results": results,
     }
@@ -726,6 +787,16 @@ def run_verify_grounding(config: dict, model_ref_input: str) -> dict:
     except AdapterHTTPError as e:
         return {"status": "error", "reason": e.kind, "detail": str(e)}
     latency_ms = int((time.time() - t0) * 1000)
+
+    sanitized = _sanitize_ref_for_filename(ref)
+    usage = result_obj.get("usage")
+    for quota in model.get("quotas", []):
+        if quota["metric"] == "requests":
+            ratelimit.record_usage(sanitized, quota, 1, _now=time.time())
+        elif quota["metric"] == "tokens" and usage is not None:
+            ratelimit.record_usage(sanitized, quota, usage["total_tokens"], _now=time.time())
+        elif quota["metric"] == "tokens" and usage is None:
+            ratelimit.record_usage(sanitized, quota, min(model.get("max_tokens") or 4096, 512), _now=time.time())
 
     convention = model.get("coordinate_convention", "gemini_1000")
     valid_entries, dropped = bbox_utils.extract_and_validate(raw_text, convention, width, height)
@@ -809,6 +880,7 @@ def main():
             print(f"已清除: {base}")
         else:
             print(f"目录不存在，无需清除: {base}")
+        clear_endpoint_cache()
         sys.exit(0)
 
     if not args.image:
@@ -875,11 +947,8 @@ def main():
             result = run_text_role(config, role_name, role, user_prompt, [args.image, args.image2],
                                     args.verbose, forced_model=args.model)
         elif role.get("output_schema") == "bbox_list" and role.get("query_mode") == "enumerate_then_filter":
-            if args.model:
-                print("Error: --model 不适用于 locate-ui（该role的候选池本来就只有单个"
-                      "ui-grounding model，无fallback可谈）", file=sys.stderr)
-                sys.exit(1)
-            result = run_locate_ui_role(config, role, args.prompt, args.image)
+            result = run_locate_ui_role(config, role_name, role, args.prompt, args.image,
+                                        args.verbose, forced_model=args.model)
         elif role.get("output_schema") == "bbox_list":
             result = run_locate_role(config, role_name, role, user_prompt, args.image,
                                       args.verbose, forced_model=args.model)

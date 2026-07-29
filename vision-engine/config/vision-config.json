@@ -20,8 +20,8 @@
       "output_schema": "text",
       "skip_context": true,
       "preferred_models": [
-        "gemini-flash-free",
         "gemini-lite-free",
+        "gemini-flash-free",
         "qwen3.7-plus",
         "gemini-flash",
         "gemini-lite",
@@ -38,10 +38,10 @@
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
         "gemini-flash-free",
+        "gemini-lite-free",
         "gemini-flash",
         "qwen3.7-plus",
         "qwen3-vl-plus",
-        "gemini-lite-free",
         "gemini"
       ]
     },
@@ -144,7 +144,7 @@
   "defaults": {
     "role": "comprehensive",
     "format": "json",
-    "timeout": 60
+    "timeout": 300
   },
   "cache": {
     "enabled": false,
@@ -175,7 +175,7 @@
             "ocr"
           ],
           "priority": 1,
-          "timeout": 60,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "sonnet",
           "quotas": [
@@ -200,7 +200,7 @@
             "general"
           ],
           "priority": 2,
-          "timeout": 60,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "gpt",
           "quotas": [
@@ -228,7 +228,7 @@
           ],
           "coordinate_convention": "gemini_1000",
           "priority": 1,
-          "timeout": 60,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "gemini",
           "_note": "付费Tier1：RPM=25 RPD=250（截图实测），最强视觉+grounding",
@@ -262,7 +262,7 @@
             "ui-grounding"
           ],
           "priority": 2,
-          "timeout": 30,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "gemini-flash",
           "_note": "付费Tier1：RPM=1K RPD=10K（截图实测），pro的fallback",
@@ -295,7 +295,7 @@
             "ocr"
           ],
           "priority": 3,
-          "timeout": 20,
+          "timeout": 300,
           "max_tokens": 2048,
           "alias": "gemini-lite",
           "_note": "付费Tier1：RPM=4K RPD=150K（截图实测），最轻量快速兜底",
@@ -328,7 +328,7 @@
             "ocr"
           ],
           "priority": 2,
-          "timeout": 30,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "gemini-flash-v3",
           "_note": "付费Tier1：RPM=1K TPM=2M RPD=10K（截图实测）",
@@ -369,7 +369,7 @@
             "ui-grounding"
           ],
           "priority": 2,
-          "timeout": 30,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "gemini-flash-free",
           "_note": "免费层：RPM=5 TPM=250K RPD=20（截图实测），额度极紧，仅作兜底",
@@ -402,7 +402,7 @@
             "ocr"
           ],
           "priority": 3,
-          "timeout": 20,
+          "timeout": 300,
           "max_tokens": 2048,
           "alias": "gemini-lite-free",
           "_note": "免费层：RPM=15 TPM=250K RPD=500（截图实测），额度相对宽松，免费层主力",
@@ -435,7 +435,7 @@
             "ocr"
           ],
           "priority": 4,
-          "timeout": 20,
+          "timeout": 300,
           "max_tokens": 2048,
           "alias": "gemini-lite-free-v1",
           "_note": "免费层：RPM=15 TPM=250K RPD=500（截图实测）",
@@ -478,7 +478,7 @@
           ],
           "coordinate_convention": "qwen_pixel",
           "priority": 4,
-          "timeout": 60,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "qwen3-vl-plus",
           "quotas": [
@@ -500,7 +500,7 @@
           ],
           "coordinate_convention": "qwen_pixel",
           "priority": 4,
-          "timeout": 60,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "qwen3.7-plus",
           "quotas": [
@@ -526,7 +526,7 @@
             "ocr"
           ],
           "priority": 7,
-          "timeout": 60,
+          "timeout": 300,
           "max_tokens": 4096,
           "alias": "doubao-lite",
           "_note": "豆包seed-2.0-lite，额度7/27重置后实测是否支持图片输入，暂配general待验证",

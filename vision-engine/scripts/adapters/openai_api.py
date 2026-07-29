@@ -1,7 +1,7 @@
 """OpenAI /v1/chat/completions 格式适配（覆盖 GPT-4o、Qwen2.5-VL 等 openai兼容 provider）。"""
 import httpx
 
-from .common import encode_image, classify_http_error, AdapterHTTPError
+from .common import encode_image, classify_http_error, AdapterHTTPError, make_timeout
 from .usage import parse_usage
 
 
@@ -27,7 +27,7 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        with httpx.Client(timeout=model_cfg["timeout"]) as client:
+        with httpx.Client(timeout=make_timeout(model_cfg)) as client:
             r = client.post(f"{base}/chat/completions", headers=headers, json=body)
             r.raise_for_status()
             data = r.json()

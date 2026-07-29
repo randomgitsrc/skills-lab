@@ -203,6 +203,45 @@ def record_usage(
     _with_lock(lock_path, _do)
 
 
+def fill_quota_to_limit(
+    model_name: str,
+    quota_cfg: dict,
+    _now: float | None = None,
+) -> None:
+    """429 触发时调用：将本地计数填满到 limit，使 quota 检查与 429 状态一致。
+
+    对 requests：追加 (limit - current) 条 timestamp
+    对 tokens：追加一条 (limit - current) 大小的 entry
+    已达到或超过 limit 时不追加。锁超时静默跳过。"""
+    metric = quota_cfg["metric"]
+    if metric not in SUPPORTED_METRICS:
+        return
+    window = quota_cfg["window_seconds"]
+    limit = quota_cfg["limit"]
+    now = _now if _now is not None else time.time()
+    path = _data_path(metric, window, model_name)
+    lock_path = path.with_suffix(".lock")
+
+    def _do(_lf):
+        state = _read_state(path, metric)
+        state = _prune(state, window, now)
+        current = _count_in_window(state)
+        if current >= limit:
+            return
+        gap = limit - current
+        if metric == "requests":
+            for _ in range(gap):
+                state["timestamps"].append(now)
+        elif metric == "tokens":
+            state["entries"].append([now, gap])
+        try:
+            path.write_text(json.dumps(state))
+        except OSError:
+            pass
+
+    _with_lock(lock_path, _do)
+
+
 # ═══════════════════════════════════════════════════════════
 # Cooldown (独立维度，429 触发)
 # ═══════════════════════════════════════════════════════════

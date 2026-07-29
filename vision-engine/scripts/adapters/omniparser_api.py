@@ -6,7 +6,7 @@
 """
 import httpx
 
-from .common import encode_image, classify_http_error, AdapterHTTPError
+from .common import encode_image, classify_http_error, AdapterHTTPError, make_timeout
 
 
 def health_check(base_url: str, timeout: float = 3.0) -> bool:
@@ -29,7 +29,7 @@ def detect(model_cfg: dict, image_path: str) -> list[dict]:
     b64, media_type = encode_image(image_path)
 
     try:
-        with httpx.Client(timeout=model_cfg.get("timeout") or 30) as client:
+        with httpx.Client(timeout=make_timeout(model_cfg)) as client:
             r = client.post(f"{base}/parse", json={"image_base64": b64, "media_type": media_type})
             r.raise_for_status()
             data = r.json()

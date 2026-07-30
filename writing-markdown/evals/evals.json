@@ -1,0 +1,23 @@
+{
+  "skill_name": "writing-markdown",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我写一个 API 文档，介绍我们项目的用户认证模块。包含登录、注册、token 刷新三个接口。项目使用 Express + JWT。",
+      "expected_output": "Markdown document with: ATX headings numbered 1/1.1 style, code blocks with language specified (javascript/json), Mermaid sequence diagram for auth flow, tables for API params, CJK-Latin spaces, full-width Chinese punctuation, relative image paths if any, blank lines around all structural elements",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Write a README for a Python CLI tool called 'db-migrate'. It manages database migrations with commands: init, create, up, down, status. Include installation, usage, and a quick start guide.",
+      "expected_output": "Markdown document with: single H1, ATX numbered headings, code blocks with bash/python language, Mermaid flowchart for migration flow, consistent hyphen lists, pipes aligned in tables, no HTML, trailing newline",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我需要一份系统架构设计文档，描述一个微服务电商系统。包含用户服务、商品服务、订单服务、支付服务。需要画架构图和时序图。",
+      "expected_output": "Markdown document with: ATX numbered headings, Mermaid architecture diagram (not ASCII), Mermaid sequence diagram for order flow, CJK-Latin spaces throughout, full-width punctuation, proper Chinese ellipsis/dash if used, tables for service comparison, blank lines consistent",
+      "files": []
+    }
+  ]
+}

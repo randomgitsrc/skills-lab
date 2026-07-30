@@ -20,10 +20,10 @@
       "output_schema": "text",
       "skip_context": true,
       "preferred_models": [
-        "gemini-lite-free",
         "gemini-flash-free",
         "qwen3.7-plus",
         "gemini-flash",
+        "gemini-lite-free",
         "gemini-lite",
         "gemini"
       ]
@@ -38,9 +38,9 @@
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
         "gemini-flash-free",
+        "qwen3.7-plus",
         "gemini-lite-free",
         "gemini-flash",
-        "qwen3.7-plus",
         "qwen3-vl-plus",
         "gemini"
       ]
@@ -85,9 +85,9 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/compare.md",
       "preferred_models": [
-        "gemini-flash-free",
         "gemini-flash",
         "qwen3.7-plus",
+        "gemini-flash-free",
         "qwen3-vl-plus",
         "gemini-lite-free",
         "gemini"

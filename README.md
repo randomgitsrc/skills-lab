@@ -19,7 +19,6 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 | Skill | Purpose |
 |-------|---------|
 | `playwright-cdp` | Chrome CDP browser automation via Playwright |
-| `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script (deprecated — use vision-engine) |
 | `vision-engine` | Unified vision analysis: multi-model routing, bounding box, structured JSON output |
 | `skill-reviewer` | Systematic skill quality evaluation framework |
 | `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
@@ -59,14 +58,3 @@ python vision-engine/scripts/vision-analyze.py -i /tmp/screenshot.png -p "描述
 ```
 
 Config in `vision-engine/config/vision-config.json`. Supports multiple vision providers with automatic fallback.
-
-## Vision Analyzer CLI (deprecated)
-
-Requires `.env` with:
-
-```
-VISION_API_KEY=sk-xxx
-VISION_API_BASE_URL=https://api.example.com
-VISION_MODEL=model-name
-VISION_API_FORMAT=anthropic
-```

@@ -27,7 +27,6 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 | Skill | Purpose |
 |-------|---------|
 | `playwright-cdp` | Chrome CDP browser automation via Playwright |
-| `vision-analyzer` | Image analysis via vision-helper sub-agent or CLI script (deprecated — use vision-engine) |
 | `vision-engine` | Unified vision analysis: multi-model routing, bounding box, structured JSON output |
 | `skill-reviewer` | Systematic skill quality evaluation framework |
 | `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
@@ -38,7 +37,6 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 - SKILL.md is the single source of truth; reference/template files are supplementary
 - Content is bilingual (Chinese + English) — preserve both when editing
 - playwright-cdp scripts run with `NODE_PATH=$(npm root -g) npx tsx script.ts` (Playwright is a global install, not local)
-- vision-analyzer CLI requires `.env` with `VISION_API_KEY`, `VISION_API_BASE_URL`, `VISION_MODEL`, `VISION_API_FORMAT`
 - vision-engine CLI requires `pip install -r vision-engine/scripts/requirements.txt`; config in `vision-engine/config/vision-config.json`
 
 ## When Editing Skills

@@ -20,13 +20,13 @@
       "output_schema": "text",
       "skip_context": true,
       "preferred_models": [
-        "gemini-flash-free",
-        "qwen3.7-plus",
-        "gemini-flash",
-        "gemini-lite-free",
-        "gemini-lite",
-        "gemini"
-      ]
+        "gemini-flash-lite-free",
+        "gemini-flash-lite-free-35",
+        "qwen-flash",
+        "qwen-vl-flash",
+        "gemini-flash-lite"
+      ],
+      "_note": "免费浮动 lite 打头（0 成本），免费 pin 兜底，再廉价付费溢出"
     },
     "comprehensive": {
       "system_prompt": null,
@@ -37,12 +37,11 @@
       "default": true,
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
-        "gemini-flash-free",
-        "qwen3.7-plus",
-        "gemini-lite-free",
         "gemini-flash",
-        "qwen3-vl-plus",
-        "gemini"
+        "qwen-max",
+        "gemini-pro",
+        "qwen-vl",
+        "doubao-lite"
       ]
     },
     "ocr": {
@@ -53,13 +52,13 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/ocr.md",
       "preferred_models": [
-        "gemini-flash-free",
-        "qwen3.7-plus",
-        "qwen3-vl-plus",
+        "gemini-pro",
         "gemini-flash",
-        "gemini",
+        "qwen-vl",
+        "qwen-vl-235b",
         "doubao-lite"
-      ]
+      ],
+      "_note": "Gemini 原生 OCR 优先，qwen-vl 覆盖中文密集文本"
     },
     "code": {
       "system_prompt": null,
@@ -69,11 +68,10 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/code.md",
       "preferred_models": [
-        "gemini-flash-free",
-        "qwen3.7-plus",
         "gemini-flash",
-        "gemini",
-        "doubao-lite"
+        "qwen-plus",
+        "qwen-max",
+        "gemini-pro"
       ]
     },
     "compare": {
@@ -85,12 +83,10 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/compare.md",
       "preferred_models": [
+        "gemini-pro",
         "gemini-flash",
-        "qwen3.7-plus",
-        "gemini-flash-free",
-        "qwen3-vl-plus",
-        "gemini-lite-free",
-        "gemini"
+        "qwen-max",
+        "qwen-vl"
       ]
     },
     "locate": {
@@ -102,10 +98,11 @@
       "query_mode": "targeted",
       "system_prompt_file": "prompts/locate.md",
       "preferred_models": [
-        "qwen3.7-plus",
-        "qwen3-vl-plus",
-        "gemini"
-      ]
+        "gemini-pro",
+        "qwen-vl",
+        "qwen-vl-235b"
+      ],
+      "_note": "仅 grounding 模型，无通用兜底；doubao-pro 待 verify-grounding 通过后再加入"
     },
     "locate-ui": {
       "system_prompt": null,
@@ -116,12 +113,11 @@
       "query_mode": "enumerate_then_filter",
       "system_prompt_file": "prompts/locate-ui.md",
       "preferred_models": [
-        "gemini-flash-free",
-        "qwen3.7-plus",
-        "qwen3-vl-plus",
-        "gemini-flash"
+        "qwen-vl",
+        "gemini-flash",
+        "qwen-vl-flash"
       ],
-      "_note": "内置精简枚举prompt，role级timeout/max_tokens覆盖model默认值"
+      "_note": "仅 ui-grounding 模型；doubao-lite 实测 grounding 不达标（IoU 0.33/0.0），不入池"
     },
     "promptify": {
       "system_prompt_file": "prompts/reverse-prompt.md",
@@ -131,14 +127,12 @@
       "output_schema": "text",
       "max_tokens": 8192,
       "preferred_models": [
-        "gemini-flash-free",
-        "qwen3.7-plus",
-        "qwen3-vl-plus",
-        "gemini-lite-free",
-        "gemini",
-        "gemini-flash"
+        "gemini-flash",
+        "gemini-pro",
+        "qwen-max",
+        "qwen-vl"
       ],
-      "_note": "逆向提示词工程：写轮眼式复刻，自动选MJ/DALL-E/SD格式，max_tokens=8192确保长prompt不被截断"
+      "_note": "逆向提示词工程，max_tokens=8192 确保长 prompt 不被截断"
     }
   },
   "defaults": {
@@ -202,7 +196,7 @@
           "priority": 2,
           "timeout": 300,
           "max_tokens": 4096,
-          "alias": "gpt",
+          "alias": "gpt-5.6",
           "quotas": [
             {
               "metric": "requests",
@@ -230,8 +224,8 @@
           "priority": 1,
           "timeout": 300,
           "max_tokens": 4096,
-          "alias": "gemini",
-          "_note": "付费Tier1：RPM=25 RPD=250（截图实测），最强视觉+grounding",
+          "alias": "gemini-pro",
+          "_note": "付费 Tier1：RPM=25 RPD=250（截图实测），grounding 主力",
           "quotas": [
             {
               "metric": "requests",
@@ -255,7 +249,7 @@
           "cooldown_seconds": 60
         },
         {
-          "name": "gemini-3.6-flash",
+          "name": "gemini-flash-latest",
           "capabilities": [
             "general",
             "ocr",
@@ -265,7 +259,41 @@
           "timeout": 300,
           "max_tokens": 4096,
           "alias": "gemini-flash",
-          "_note": "付费Tier1：RPM=1K RPD=10K（截图实测），pro的fallback",
+          "_note": "浮动别名→最新 flash；限流按 flash 档近似（3.6-flash 截图实测值），漂移后需复核",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 1000,
+              "_note": "按 flash 档近似（3.6-flash 截图实测）"
+            },
+            {
+              "metric": "requests",
+              "window_seconds": 86400,
+              "limit": 10000,
+              "_note": "按 flash 档近似"
+            },
+            {
+              "metric": "tokens",
+              "window_seconds": 60,
+              "limit": 2000000,
+              "_note": "按 flash 档近似"
+            }
+          ],
+          "cooldown_seconds": 60
+        },
+        {
+          "name": "gemini-3.6-flash",
+          "capabilities": [
+            "general",
+            "ocr",
+            "ui-grounding"
+          ],
+          "priority": 2,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "gemini-flash-36",
+          "_note": "付费 Tier1：RPM=1K RPD=10K（截图实测），浮动档的 pin 兜底（促销价）",
           "quotas": [
             {
               "metric": "requests",
@@ -289,6 +317,39 @@
           "cooldown_seconds": 60
         },
         {
+          "name": "gemini-flash-lite-latest",
+          "capabilities": [
+            "general",
+            "ocr"
+          ],
+          "priority": 3,
+          "timeout": 300,
+          "max_tokens": 2048,
+          "alias": "gemini-flash-lite",
+          "_note": "浮动别名→最新 flash-lite；限流按 lite 档近似（3.5-flash-lite 截图实测值）",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 4000,
+              "_note": "按 lite 档近似（3.5-flash-lite 截图实测）"
+            },
+            {
+              "metric": "requests",
+              "window_seconds": 86400,
+              "limit": 150000,
+              "_note": "按 lite 档近似"
+            },
+            {
+              "metric": "tokens",
+              "window_seconds": 60,
+              "limit": 4000000,
+              "_note": "按 lite 档近似"
+            }
+          ],
+          "cooldown_seconds": 60
+        },
+        {
           "name": "gemini-3.5-flash-lite",
           "capabilities": [
             "general",
@@ -297,8 +358,8 @@
           "priority": 3,
           "timeout": 300,
           "max_tokens": 2048,
-          "alias": "gemini-lite",
-          "_note": "付费Tier1：RPM=4K RPD=150K（截图实测），最轻量快速兜底",
+          "alias": "gemini-flash-lite-35",
+          "_note": "付费 Tier1：RPM=4K RPD=150K（截图实测），lite 浮动档的 pin 兜底",
           "quotas": [
             {
               "metric": "requests",
@@ -320,39 +381,6 @@
             }
           ],
           "cooldown_seconds": 60
-        },
-        {
-          "name": "gemini-3-flash-preview",
-          "capabilities": [
-            "general",
-            "ocr"
-          ],
-          "priority": 2,
-          "timeout": 300,
-          "max_tokens": 4096,
-          "alias": "gemini-flash-v3",
-          "_note": "付费Tier1：RPM=1K TPM=2M RPD=10K（截图实测）",
-          "quotas": [
-            {
-              "metric": "requests",
-              "window_seconds": 60,
-              "limit": 1000,
-              "_note": "Tier1 RPM 截图实测"
-            },
-            {
-              "metric": "requests",
-              "window_seconds": 86400,
-              "limit": 10000,
-              "_note": "Tier1 RPD 截图实测"
-            },
-            {
-              "metric": "tokens",
-              "window_seconds": 60,
-              "limit": 2000000,
-              "_note": "Tier1 TPM 截图实测"
-            }
-          ],
-          "cooldown_seconds": 60
         }
       ]
     },
@@ -362,7 +390,7 @@
       "api_key_env": "GOOGLE_API_KEY_FREE",
       "models": [
         {
-          "name": "gemini-3.6-flash",
+          "name": "gemini-flash-latest",
           "capabilities": [
             "general",
             "ocr",
@@ -372,25 +400,58 @@
           "timeout": 300,
           "max_tokens": 4096,
           "alias": "gemini-flash-free",
-          "_note": "免费层：RPM=5 TPM=250K RPD=20（截图实测），额度极紧，仅作兜底",
+          "_note": "免费浮动 flash；限流未对 latest 单独实测，按 flash 免费档近似（3.6-flash free 截图实测）",
           "quotas": [
             {
               "metric": "requests",
               "window_seconds": 60,
               "limit": 5,
-              "_note": "免费 RPM 截图实测"
+              "_note": "按 flash 免费档近似"
             },
             {
               "metric": "requests",
               "window_seconds": 86400,
               "limit": 20,
-              "_note": "免费 RPD 截图实测"
+              "_note": "免费 RPD=20 极紧，仅兜底"
             },
             {
               "metric": "tokens",
               "window_seconds": 60,
               "limit": 250000,
-              "_note": "免费 TPM 截图实测"
+              "_note": "免费 TPM 近似"
+            }
+          ],
+          "cooldown_seconds": 60
+        },
+        {
+          "name": "gemini-flash-lite-latest",
+          "capabilities": [
+            "general",
+            "ocr"
+          ],
+          "priority": 3,
+          "timeout": 300,
+          "max_tokens": 2048,
+          "alias": "gemini-flash-lite-free",
+          "_note": "免费浮动 lite（quick 主力）；限流按 lite 免费档近似（3.5-flash-lite free 截图实测 RPD 500）",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 15,
+              "_note": "按 lite 免费档近似"
+            },
+            {
+              "metric": "requests",
+              "window_seconds": 86400,
+              "limit": 500,
+              "_note": "按 lite 免费档近似"
+            },
+            {
+              "metric": "tokens",
+              "window_seconds": 60,
+              "limit": 250000,
+              "_note": "免费 TPM 近似"
             }
           ],
           "cooldown_seconds": 60
@@ -404,8 +465,8 @@
           "priority": 3,
           "timeout": 300,
           "max_tokens": 2048,
-          "alias": "gemini-lite-free",
-          "_note": "免费层：RPM=15 TPM=250K RPD=500（截图实测），额度相对宽松，免费层主力",
+          "alias": "gemini-flash-lite-free-35",
+          "_note": "免费层：RPM=15 RPD=500（截图实测），lite 浮动档的 pin 兜底",
           "quotas": [
             {
               "metric": "requests",
@@ -437,8 +498,8 @@
           "priority": 4,
           "timeout": 300,
           "max_tokens": 2048,
-          "alias": "gemini-lite-free-v1",
-          "_note": "免费层：RPM=15 TPM=250K RPD=500（截图实测）",
+          "alias": "gemini-flash-lite-free-31",
+          "_note": "免费层：RPM=15 RPD=500（截图实测），免费 legacy",
           "quotas": [
             {
               "metric": "requests",
@@ -473,20 +534,86 @@
           "capabilities": [
             "general",
             "ocr",
-            "ui-grounding",
-            "grounding"
+            "grounding",
+            "ui-grounding"
           ],
           "coordinate_convention": "qwen_pixel",
           "priority": 4,
           "timeout": 300,
           "max_tokens": 4096,
-          "alias": "qwen3-vl-plus",
+          "alias": "qwen-vl",
+          "_note": "官方 3000 RPM/5M TPM；此处保守 300 RPM",
           "quotas": [
             {
               "metric": "requests",
               "window_seconds": 60,
-              "limit": 30,
-              "_note": "Aliyun 百炼默认"
+              "limit": 300,
+              "_note": "保守值，官方 3000（控制台为准）"
+            }
+          ]
+        },
+        {
+          "name": "qwen3-vl-235b-thinking",
+          "capabilities": [
+            "general",
+            "ocr",
+            "grounding",
+            "ui-grounding"
+          ],
+          "coordinate_convention": "qwen_pixel",
+          "priority": 4,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "qwen-vl-235b",
+          "_note": "官方 60 RPM/100K TPM；最强 VL 推理",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 60,
+              "_note": "官方值"
+            }
+          ]
+        },
+        {
+          "name": "qwen3-vl-flash",
+          "capabilities": [
+            "general",
+            "ocr",
+            "ui-grounding"
+          ],
+          "coordinate_convention": "qwen_pixel",
+          "priority": 4,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "qwen-vl-flash",
+          "_note": "性价比王，官方 3000 RPM/5M TPM；此处保守 300 RPM",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 300,
+              "_note": "保守值，官方 3000（控制台为准）"
+            }
+          ]
+        },
+        {
+          "name": "qwen3.7-flash",
+          "capabilities": [
+            "general",
+            "ocr"
+          ],
+          "priority": 4,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "qwen-flash",
+          "_note": "统一多模态，官方 30K RPM/5M TPM；此处保守 1000 RPM",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 1000,
+              "_note": "保守值，官方 30000（控制台为准）"
             }
           ]
         },
@@ -494,28 +621,46 @@
           "name": "qwen3.7-plus",
           "capabilities": [
             "general",
-            "ocr",
-            "ui-grounding",
-            "grounding"
+            "ocr"
           ],
-          "coordinate_convention": "qwen_pixel",
           "priority": 4,
           "timeout": 300,
           "max_tokens": 4096,
-          "alias": "qwen3.7-plus",
+          "alias": "qwen-plus",
+          "_note": "统一多模态 1M 上下文，官方 30K RPM/5M TPM；此处保守 1000 RPM",
           "quotas": [
             {
               "metric": "requests",
               "window_seconds": 60,
-              "limit": 30,
-              "_note": "Aliyun 百炼默认"
+              "limit": 1000,
+              "_note": "保守值，官方 30000（控制台为准）"
+            }
+          ]
+        },
+        {
+          "name": "qwen3.8-max",
+          "capabilities": [
+            "general",
+            "ocr"
+          ],
+          "priority": 4,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "qwen-max",
+          "_note": "最强旗舰，动态限流（按消费档位）；此处保守 60 RPM",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 60,
+              "_note": "保守值，官方为动态限流（控制台为准）"
             }
           ]
         }
       ]
     },
     "volcengine": {
-      "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
       "api_format": "openai",
       "api_key_env": "VOLCENGINE_API_KEY",
       "models": [
@@ -525,17 +670,57 @@
             "general",
             "ocr"
           ],
-          "priority": 7,
+          "priority": 5,
           "timeout": 300,
           "max_tokens": 4096,
           "alias": "doubao-lite",
-          "_note": "豆包seed-2.0-lite，额度7/27重置后实测是否支持图片输入，暂配general待验证",
+          "_note": "仅 260428 日期版可用（实测：未版本化 ID 不存在、pro/mini 未开通）；多模态/OCR 实测通过（quick/ocr 均可用，单图 1280 token）；grounding 实测不达标（IoU 0.33/0.0 不稳定），不打 grounding/ui-grounding 标签",
           "quotas": [
             {
               "metric": "requests",
               "window_seconds": 60,
-              "limit": 30,
-              "_note": "火山默认"
+              "limit": 100,
+              "_note": "保守值，官方 30K RPM（控制台为准）"
+            }
+          ]
+        },
+        {
+          "name": "doubao-seed-2-0-mini",
+          "capabilities": [
+            "general",
+            "ocr"
+          ],
+          "priority": 5,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "doubao-mini",
+          "_note": "性价比档；⚠️ 本账号未开通该模型（实测 ModelNotOpen），预留待开通",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 100,
+              "_note": "保守值，官方 30000（控制台为准）"
+            }
+          ]
+        },
+        {
+          "name": "doubao-seed-2-0-pro",
+          "capabilities": [
+            "general",
+            "ocr"
+          ],
+          "priority": 5,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "doubao-pro",
+          "_note": "视觉定位（官方宣称）；⚠️ 本账号未开通该模型（实测 ModelNotOpen）；开通后跑 verify-grounding，通过再补 grounding 并入 locate 池",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 100,
+              "_note": "保守值，官方 30K RPM（控制台为准）"
             }
           ]
         }

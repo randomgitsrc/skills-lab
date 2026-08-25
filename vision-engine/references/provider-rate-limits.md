@@ -18,6 +18,9 @@
 - 定价页：https://ai.google.dev/pricing
 - 后台实时值：https://aistudio.google.com/rate-limit
 
+> ⚠️ 下表 alias 列为**旧快照**（`gemini`/`gemini-lite`/`gemini-lite-free-v1` 等已弃用）。
+> 现行 alias 规范以 `references/model-recommendation-2026.md` §2.2 为准（如 `gemini-flash-lite`/`gemini-flash-lite-free-35`）。
+
 ### 官方文档明确的内容
 
 | 项目 | 值 |
@@ -53,6 +56,15 @@
 ### 注意
 - **免费层 RPD=20 极紧**：gemini-flash-free 一天只能调 20 次，作为兜底而非主力
 - config 用两个 provider 区分付费 key（`google`，env `GOOGLE_API_KEY_TIRE1`）和免费 key（`google-free`，env `GOOGLE_API_KEY_FREE`），各自走同一组模型但限流不同
+
+### `-latest` 浮动别名（2026-08-25 实测补充）
+
+- Google 官方提供浮动别名：`gemini-flash-latest`、`gemini-flash-lite-latest`、`gemini-pro-latest`，热替换到该家族最新版（破坏性变更前 2 周邮件通知）
+- **免费 key 下可用**（实测 API `/v1beta/models` 返回含以上全部别名；上下文 1M / 输出 64K / 完整多模态）
+- `-latest` **无独立定价段**：继承当前指向那代的价格（如 flash-lite-latest 现在按 3.5-flash-lite 价 $0.30/$2.50）
+- 免费层限流未对 `-latest` 单独截图实测，建议按当前代近似配（flash-lite 档 15/500/250k）
+- 字面 `gemini-flash-lite`（无版本号）**不存在**——lite 家族只有版本化（3.5/3.1）与浮动（-latest）
+- 完整推荐配置与配额说明见 `references/model-recommendation-2026.md`
 
 ---
 
@@ -176,15 +188,30 @@ vision-engine 当前 qwen3-vl-plus / qwen3.7-plus 配 `requests:30/60s`，`_note
 
 ### 来源
 - 官方文档库：https://docs.volcengine.com/docs/82379/
+- 实测验证：2026-08-25 直接调 API（models 列表 + chat/completions）核实
+
+### 关键实测结论（2026-08-25，比官方文档更可信）
+
+1. **base_url 必须用 `/api/v3`**：`/api/coding/v3` 是 CodingPlan 订阅专用端点，本账号无订阅会报 `InvalidSubscription`（HTTP 400）。标准 Ark 端点 `https://ark.cn-beijing.volces.com/api/v3` 实测可用。
+2. **未版本化 ID 不存在**：`doubao-seed-2-0-lite` 直接 404 `InvalidEndpointOrModel.NotFound`——必须用带日期的 pin 版（如 `doubao-seed-2-0-lite-260428`）。
+3. **本账号仅开通 `doubao-seed-2-0-lite-260428`**：`doubao-seed-2-0-mini`、`doubao-seed-2-0-pro` 均报 404 `ModelNotOpen`（未开通）。
+4. **lite 多模态/OCR 实测通过**：quick（颜色/文字识别）、ocr（提取 HELLO 2026）均正确，单图固定 1280 token。
+5. **lite grounding 实测不达标**：`--verify-grounding` 两次结果 IoU=0.33 / 0.0（一次框不准、一次无框），**不打 grounding/ui-grounding 标签**。
 
 ### 官方限流信息
-火山引擎方舟的**官方文档未在公开网页列出具体的 QPS/并发/TPM 数值**（多个限流文档页返回空内容或仅导航结构）。限流信息需登录方舟控制台查看。
+方舟**无全局固定 QPS**，按模型限流（同账号同模型共享，平台设定不可手动调整，提额需工单）。指标：TPM / TPD / RPM / Inflight Batchsize；突发返回 429，可用 `X-Ark-Max-Wait-Timeout-Ms`（最长 300000ms）缓解。官方文档未公开具体数值，下表为模型列表公开典型值：
 
-### config 现状
-vision-engine 当前 doubao-seed-2-0-lite-260428 配 `requests:30/60s`，`_note` 标注"火山默认"——保守默认值。官方公开文档未核实到具体数值，建议控制台核实。
+| 模型 | 最大 RPM | 最大 TPM | 备注 |
+|---|---|---|---|
+| doubao-seed-2-0-lite / mini / pro | 30,000 | 5,000,000 | 全系默认高配额 |
+| doubao-seed-1-8 | 30,000 | 5,000,000 | 上代主力 |
+| doubao-seed-2-1-pro / turbo | 500（高配 30,000） | 1,000,000 → 5,000,000 | 默认较低 |
+| doubao-seed-1-6-vision | 30,000（部分档 5k/15k） | 5,000,000（部分档 1.2M/1.5M） | 即将下线 |
 
-### 注意
-doubao-lite 的 `_note` 还标注"额度 7/27 重置后实测是否支持图片输入，暂配 general 待验证"——该模型的图片输入能力和实际限流**均需实测确认**。
+### config 现状（2026-08-25 更新）
+- `volcengine` provider：base_url=`/api/v3`（已从错误的 `/api/coding/v3` 修正）
+- `doubao-seed-2-0-lite-260428`：`requests:100/60s`（保守），`_note` 已标注实测结论（未版本化不存在、仅此版开通、多模态/OCR 通过、grounding 不达标）
+- `doubao-seed-2-0-mini` / `doubao-seed-2-0-pro`：保留条目，`_note` 标注「本账号未开通（ModelNotOpen），预留待开通」
 
 ---
 
@@ -197,9 +224,9 @@ doubao-lite 的 `_note` 还标注"额度 7/27 重置后实测是否支持图片�
 | anthropic | sonnet | 60 RPM（保守） | 官方 Start=1000 RPM | ⚠️ 远低于官方值，可上调 |
 | openai | gpt-5.6-terra | 60 RPM（保守） | 官方未公开，需后台查 | ⚠️ 保守值，待核实 |
 | alibailian | qwen 系列 | 30 RPM（保守） | 官方 qwen-plus=30000 RPM | ⚠️ 远低于官方值，视觉模型待核实 |
-| volcengine | doubao-lite | 30 RPM（保守） | 官方未公开 | ⚠️ 保守值，待核实 |
+| volcengine | doubao-lite | 100 RPM（保守） | 官方 30K RPM（模型列表公开值）+ 实测 | ✅ 已核实端点/开通状态/grounding；额度保守 |
 
-**结论**：Google 两层（付费+免费）已按截图实测配齐，是唯一完全核实的 provider。其余四个 provider 用的是保守默认值（60 或 30 RPM），均低于官方标准值——这是"宁可少调不浪费额度"的稳妥策略，实际可用额度更大。如需放开限流，anthropic 和 alibailian 可直接套官方值，openai 和 volcengine 需登录后台核实。
+**结论**：Google 两层（付费+免费）已按截图实测配齐，是唯一完全核实的 provider。其余 provider 用保守默认值——稳妥策略，实际可用额度更大。**volcengine 已于 2026-08-25 完成 API 实测**（端点/开通状态/多模态/grounding），是三家中唯一完成端到端实测的；如需放开限流，anthropic 和 alibailian 可直接套官方值，openai 需登录后台核实。
 
 ---
 
@@ -212,6 +239,8 @@ doubao-lite 的 `_note` 还标注"额度 7/27 重置后实测是否支持图片�
 | Anthropic 限流 + 定价 | 2026-07-27 核实 |
 | OpenAI 模型信息 + 限流机制 | 2026-07-27 核实 |
 | 阿里云百炼限流 | 2026-07-27 核实 |
-| 火山引擎方舟 | 2026-07-27 核实（官方未公开具体数值） |
+| 火山引擎方舟 | 2026-07-27 核实（官方未公开具体数值）；2026-08-25 WAF 绕过 + 内容 API 补全价格/限流（见 model-recommendation-2026.md） |
+| Google `-latest` 别名免费可用性 | 2026-08-25 实测（API models 列表） |
+| 火山方舟 API 端到端实测（/api/v3 端点、未版本化不存在、仅 lite-260428 开通、多模态/OCR 通过、grounding 不达标） | 2026-08-25 实测 |
 
 > provider 政策会变。重新核对时优先看官方文档链接，截图实测值需重新到后台截图比对。

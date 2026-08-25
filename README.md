@@ -12,20 +12,27 @@ ln -s ~/oclab/skills-lab/<skill> ~/.config/opencode/skills/
 
 # Claude Code
 ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
+
+# DeepSeek Harness (DSH) — two discovery roots, both are scanned
+ln -s ~/oclab/skills-lab/<skill> ~/.dsh/skills/
+ln -s ~/oclab/skills-lab/<skill> ~/.agents/skills/
 ```
+
+DSH scans both `~/.dsh/skills/` (user-dsh) and `~/.agents/skills/` (user-agents). Same-name skills are auto-deduplicated by priority rank — user-dsh wins over user-agents — with a harmless warning logged for the ignored copy. Linking each skill into one root is still recommended to keep it noise-free.
 
 ## Current Skills
 
-| Skill | Purpose |
-|-------|---------|
-| `playwright-cdp` | Chrome CDP browser automation via Playwright |
-| `vision-engine` | Unified vision analysis: multi-model routing, bounding box, structured JSON output |
-| `skill-reviewer` | Systematic skill quality evaluation framework |
-| `skill-maker` | Create, test, iterate, and optimize agent skills with eval toolchain |
+| Skill           | Purpose                                                                        |
+|-----------------|--------------------------------------------------------------------------------|
+| `playwright-cdp`  | Chrome CDP browser automation via Playwright                                  |
+| `vision-engine`   | Unified vision analysis: multi-model routing, bounding box, structured JSON output |
+| `skill-reviewer`  | Systematic skill quality evaluation framework                                 |
+| `skill-maker`     | Create, test, iterate, and optimize agent skills with eval toolchain          |
+| `writing-markdown`| Consistent Markdown style: headings, fences, diagrams, tables, Chinese typography |
 
 ## Skill Structure
 
-```
+```text
 <skill>/
   SKILL.md          # Entrypoint — single source of truth
   templates/        # Copy-paste-runnable code templates
@@ -33,6 +40,7 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
   scripts/          # CLI tools
   agents/           # Subagent instructions (grader, analyzer, comparator)
   assets/           # Templates, static files
+  evals/            # Eval cases for skill quality testing
 ```
 
 ## Conventions
@@ -41,6 +49,7 @@ ln -s ~/oclab/skills-lab/<skill> ~/.claude/skills/
 - Keep SKILL.md under 500 lines; move detail to `reference/`
 - Content is bilingual (Chinese + English)
 - Code snippets must be copy-paste-runnable — no `...` or `TODO` placeholders
+- Docs in this repo (README.md, AGENTS.md) follow the `writing-markdown` skill style
 
 ## Running Playwright Scripts
 

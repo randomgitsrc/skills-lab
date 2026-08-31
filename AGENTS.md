@@ -34,6 +34,7 @@ DSH scans both `~/.dsh/skills/` (user-dsh) and `~/.agents/skills/` (user-agents)
 |-----------------|--------------------------------------------------------------------------------|
 | `playwright-cdp`  | Chrome CDP browser automation via Playwright                                  |
 | `vision-engine`   | Unified vision analysis: multi-model routing, bounding box, structured JSON output |
+| `repomap-lite`    | Zero-dependency multi-language codebase map (REPOMAP.md)                     |
 | `skill-reviewer`  | Systematic skill quality evaluation framework                                 |
 | `skill-maker`     | Create, test, iterate, and optimize agent skills with eval toolchain          |
 | `writing-markdown`| Consistent Markdown style: headings, fences, diagrams, tables, Chinese typography |

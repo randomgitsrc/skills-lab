@@ -499,17 +499,33 @@ def render_index(entries: list[tuple[str, int]], max_entries: Optional[int] = No
     冷启动时先看到整个仓库摊开在哪、哪些文件是重点，再按需下钻到具体
     block。符号数是"该文件提取到的符号（函数/类/结构体等）数量"。
 
-    max_entries 是索引本身最多展示的文件数（None 表示不设上限，展示全部）。
-    这是补上"符号总数预算能防止逐符号 block 无限膨胀，但索引本身在文件
-    数量极多的仓库（数万文件级）下依然可能长到几百KB甚至更多"这个问题——
-    用真实数据验证过：一个一万文件的仓库，光是索引段就有约23万字符，
-    虽然远小于展开全部符号细节的体积，但已经不是"扫一眼"级别的开销了。
+    max_entries 是索引本身**展示给人看**的文件数上限（None 表示不设上限，
+    展示全部）。这是补上"符号总数预算能防止逐符号 block 无限膨胀，但索引
+    本身在文件数量极多的仓库（数万文件级）下依然可能长到几百KB甚至更多"
+    这个问题——用真实数据验证过：一个一万文件的仓库，光是索引段就有约
+    23万字符，虽然远小于展开全部符号细节的体积，但已经不是"扫一眼"级别
+    的开销了。
 
     截断规则：按符号数从多到少排序后，只展示前 max_entries 个（这些通常
-    是最值得关注的文件），其余的**不逐条列出**，但用一行聚合信息交代
-    "还有多少文件、总共多少符号"，不是完全不提——这是跟上面
-    full_detail_byte_budget 截断逐符号 block 时同样的原则："可以不展开
-    细节，但不能让一批文件的存在完全从产出物里消失、用户/agent 无从得知"。
+    是最值得关注的文件），其余的**不逐条展示给人看**，但一定要完整保留
+    在一段机器可读、人类阅读时会忽略的存档注释里（见下方 _ARCHIVE_MARKER），
+    不是彻底不写进文件——这是本文件修复过的一个真实数据丢失 bug 换来的
+    设计要求：早期版本"其余的不逐条列出"确实做到了"给人看的部分不冗长"，
+    但同时也意味着这些文件的路径+符号数**从磁盘上彻底消失**，后续
+    `--update-file` 增量更新时解析已有 REPOMAP.md 完全无法恢复它们的身份
+    ——用真实的一万文件测试仓库复现过：仅仅因为这些文件排在索引第500名
+    之后（被展示截断，不是被"预算降级"截断——这是两种独立的截断机制，
+    详见 parse_existing_map 的说明），一次简单的增量更新就会让它们从地图
+    里彻底消失，不是退化成"仅索引条目"，而是连索引条目都没有了。
+
+    "展示给人看的部分"和"机器可读的完整存档"分开维护，解决的正是这个
+    问题：人类/agent 正常阅读时只看到简洁的前 max_entries 行 + 一行聚合
+    提示，视觉上跟修复前完全一样；但完整的路径+符号数列表始终以机器可读
+    格式存在于文件里（用真实数据验证过：一万文件时这部分存档约22万字符，
+    这是"保证数据不丢失"必须付出的代价，跟前面 full_detail_byte_budget
+    "可以不展开细节但不能让文件的存在消失"是完全同一个原则在索引这一层的
+    体现——如果连这份存档都不写，index_max_entries 这个截断机制本身就是
+    一个数据丢失的定时炸弹，只是触发条件比 full_detail_byte_budget 更隐蔽）。
     """
     lines = ["<!-- 索引：文件清单 · 符号数（从多到少），供快速定位重点文件 -->"]
     ordered = sorted(entries, key=lambda x: (-x[1], x[0]))
@@ -523,7 +539,51 @@ def render_index(entries: list[tuple[str, int]], max_entries: Optional[int] = No
             f"<!-- 还有 {len(remaining)} 个文件（共 {remaining_symbol_total} 个符号）未在索引里逐条列出，"
             f"用 --index-max-entries 调大索引展示上限可以看到更多 -->"
         )
+        lines.append(render_index_archive(remaining))
     return "\n".join(lines)
+
+
+_ARCHIVE_MARKER_OPEN = "<!-- INDEX-ARCHIVE-BEGIN (机器可读，完整保留展示截断之外的文件，人类阅读可忽略这一段)"
+_ARCHIVE_MARKER_CLOSE = "INDEX-ARCHIVE-END -->"
+
+
+def render_index_archive(entries: list[tuple[str, int]]) -> str:
+    """
+    把"展示截断"之外的 (path, count) 完整序列化进一段 HTML 注释，人类阅读
+    REPOMAP.md 时会自然跳过（视觉上就是一段看不太懂的注释块），但
+    parse_existing_map 能精确解析回完整的路径+符号数列表，不依赖"数一数
+    索引里展示了多少行"这种脆弱的判断。
+
+    格式：每行一条 `count\\tpath`（用 tab 分隔，因为路径本身可能包含空格，
+    用固定的多空格分隔在正则解析时不如 tab 明确可靠），整体包在
+    _ARCHIVE_MARKER_OPEN/_ARCHIVE_MARKER_CLOSE 之间。
+    """
+    lines = [_ARCHIVE_MARKER_OPEN]
+    for path, count in entries:
+        lines.append(f"{count}\t{path}")
+    lines.append(_ARCHIVE_MARKER_CLOSE)
+    return "\n".join(lines)
+
+
+def parse_index_archive(content: str) -> list[tuple[str, int]]:
+    """解析 render_index_archive 写入的存档段，返回 (path, count) 列表。
+    找不到存档段（比如索引本身没有触发展示截断）时返回空列表。"""
+    start = content.find(_ARCHIVE_MARKER_OPEN)
+    if start == -1:
+        return []
+    end = content.find(_ARCHIVE_MARKER_CLOSE, start)
+    if end == -1:
+        return []
+    block = content[start + len(_ARCHIVE_MARKER_OPEN) : end]
+    result = []
+    for line in block.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(\d+)\t(.+)$", line)
+        if m:
+            result.append((m.group(2), int(m.group(1))))
+    return result
 
 
 _SYMBOL_COUNT_RE = re.compile(r"^<!-- symbols: (\d+) -->", re.M)
@@ -634,12 +694,28 @@ def parse_existing_map(content: str) -> tuple[dict[str, str], list[tuple[str, in
       的文件（预算降级时被截断的那部分）。增量更新重建时这些文件必须保留在
       索引里，否则它们会从地图里静默消失（历史 bug：预算降级 + --update-file
       组合导致被截断文件全部丢失）。
+
+    index_only 的来源有两处，都要读，缺一个都会重新引入数据丢失：
+    1. 索引里**展示出来**的那部分（'  NNN  path' 这种行）——对应
+       full_detail_byte_budget 触发的"完整细节被截断，但索引里还看得到"
+       的文件。
+    2. 索引展示本身也被截断（超过 index_max_entries）时，剩余部分被
+       完整保留在 render_index_archive 写入的机器可读存档段里——这是
+       修复过的第二个真实数据丢失 bug：早期版本只解析第1种来源，导致
+       "索引展示截断"和"预算截断"两种机制同时触发的大仓库场景下
+       （用真实的一万文件测试仓库复现过），排在索引第 index_max_entries
+       名之后的文件在增量更新时被完全遗漏——不是退化成"仅索引条目"，
+       是连索引条目都没有，一次 --update-file 就能让数千个文件的存在
+       彻底从地图上消失。两处来源分别解析后合并，才能保证"只要文件曾经
+       出现过（不管是在可见索引里、还是在存档段里），它的路径+符号数
+       就不会丢"。
     """
     blocks: dict[str, str] = {}
     index_only: list[tuple[str, int]] = []
     lines = content.splitlines()
 
-    # 1) 解析顶部索引段：'<!-- 索引：' 标记之后的 '  NNN  path' 行
+    # 1) 解析顶部索引段里**展示出来**的部分：'<!-- 索引：' 标记之后的
+    #    '  NNN  path' 行
     for i, line in enumerate(lines):
         if line.startswith("<!-- 索引："):
             j = i + 1
@@ -653,6 +729,11 @@ def parse_existing_map(content: str) -> tuple[dict[str, str], list[tuple[str, in
                 index_only.append((m.group(2), int(m.group(1))))
                 j += 1
             break
+
+    # 1b) 解析索引展示截断之外、存档在机器可读注释段里的部分（见上方
+    #     docstring 第2点）。这一步不依赖上面那个循环有没有提前 break，
+    #     存档段独立查找，两处来源互不影响、可以同时存在。
+    index_only.extend(parse_index_archive(content))
 
     # 2) 解析完整 block（原有逻辑：从第一个非注释非空行开始，按空行切块）
     start_idx = 0
@@ -672,8 +753,19 @@ def parse_existing_map(content: str) -> tuple[dict[str, str], list[tuple[str, in
             path = first_line[:-1]
             blocks[path] = rb
 
-    # 3) index_only 只保留没有完整 block 的文件（有 block 的以 block 为准）
-    index_only = [(p, c) for p, c in index_only if p not in blocks]
+    # 3) index_only 去重（理论上可见索引行和存档段不会有重复路径，因为
+    #    render_index 按顺序切分、互不重叠，但增量更新场景下解析的是
+    #    "别人生成的文件"，防御性去重不吃亏——同一个路径出现多次时，
+    #    保留第一次出现的计数），再排除掉已经有完整 block 的文件
+    #    （有 block 的以 block 为准，block 里的内容更新、更权威）。
+    seen_paths: set[str] = set()
+    deduped_index_only: list[tuple[str, int]] = []
+    for p, c in index_only:
+        if p in seen_paths:
+            continue
+        seen_paths.add(p)
+        deduped_index_only.append((p, c))
+    index_only = [(p, c) for p, c in deduped_index_only if p not in blocks]
     return blocks, index_only
 
 
@@ -719,7 +811,13 @@ def update_single_file(repomap_path: Path, root: Path, update_file: Path, skip_g
     ]
     ordered_paths = sorted(blocks.keys())
     entries = [(p, extract_symbol_count(blocks[p])) for p in ordered_paths] + index_only
-    index = render_index(entries) if entries else ""
+    # 跟全量生成路径保持一致的默认展示上限，否则单次 --update-file 会让
+    # 索引展示突然从"最多500行"变回"全部展示"，行为不可预期——不管走哪条
+    # 代码路径，"索引给人看的部分不超过 DEFAULT_INDEX_MAX_ENTRIES 行"这个
+    # 承诺都应该成立，超出部分交给 render_index 内置的存档机制处理，不会
+    # 因为改用这个更简单的调用而丢数据（详见 render_index/parse_existing_map
+    # 的说明）。
+    index = render_index(entries, max_entries=DEFAULT_INDEX_MAX_ENTRIES) if entries else ""
     body = "\n\n".join(blocks[p] for p in ordered_paths)
     out = "\n".join(header)
     if index:
@@ -771,7 +869,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "（可能产出体积很大的文件，明确知道自己需要完整内容时使用）")
     p.add_argument("--index-max-entries", type=int, default=DEFAULT_INDEX_MAX_ENTRIES,
                     help=f"顶部索引最多展示的文件数，默认 {DEFAULT_INDEX_MAX_ENTRIES}（按符号数从多到少排序，"
-                         "超出部分只给出聚合计数，不逐条列出；传 0 表示不设上限，展示全部文件）")
+                         "可见索引只展示前 N 行 + 一行聚合提示，超出部分仍完整存入机器可读存档段、"
+                         "增量更新不丢文件；传 0 表示不设上限，展示全部文件）")
     p.add_argument("--update-file", type=str, default=None,
                     help="只重新解析该单个文件并合并回已有 REPOMAP.md（增量更新模式）")
     p.add_argument("--root", type=str, default=".",

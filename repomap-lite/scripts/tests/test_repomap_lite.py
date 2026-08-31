@@ -163,6 +163,57 @@ class TestIncrementalUpdate:
         # 降级提示保留
         assert "未展开完整内容" in after
 
+    def test_incremental_update_beyond_index_display_cap_does_not_lose_files(self, tmp_path, monkeypatch):
+        """
+        回归测试：修复此前一个真实的数据丢失 bug。
+
+        render_index 本身有两层独立的截断机制：
+        1. full_detail_byte_budget 控制"完整展开多少字节的逐符号内容"
+        2. index_max_entries 控制"索引本身展示给人看多少行"（默认500）
+
+        早期版本的 parse_existing_map 只解析索引里**展示出来**的那部分，
+        当文件数超过 index_max_entries 时，排在展示截断之外的文件的
+        (path, count) 从未被写进任何机器可读的位置——用真实的一万文件
+        测试仓库复现过：一次简单的 --update-file 会让数千个文件（不是
+        因为 full_detail_byte_budget 而没有完整 block 的那部分，而是
+        因为排在索引第 index_max_entries 名之后而"仅索引"信息本身都不存在
+        的那部分）从地图上彻底消失，不是退化成"仅索引条目"，是连索引
+        条目都没有了。
+
+        这里用一个刻意超过 DEFAULT_INDEX_MAX_ENTRIES（默认500）的文件数
+        （600个）复现：确保即使触发了索引展示截断，增量更新前后
+        parse_existing_map 解析出的 (blocks + index_only) 总数始终等于
+        真实文件数，一个都不能少。
+        """
+        file_count = 600
+        repo = make_repo(tmp_path, file_count=file_count)
+        out_path = tmp_path / "REPOMAP.md"
+        # 用一个足够小的字节预算，确保同时触发 full_detail_byte_budget
+        # 截断（不是所有文件都能拿到完整 block）——这样能同时验证两层
+        # 截断机制叠加时都不丢数据，而不只是单独验证索引展示截断这一层。
+        rc = rl.main(["--root", str(repo), "-o", str(out_path),
+                      "--full-detail-budget-bytes", "50000"])
+        assert rc == 0
+        before = out_path.read_text(encoding="utf-8")
+        blocks_before, index_only_before = rl.parse_existing_map(before)
+        total_before = len(blocks_before) + len(index_only_before)
+        assert total_before == file_count, (
+            f"生成后应该追踪到全部 {file_count} 个文件，实际 {total_before} 个"
+        )
+
+        monkeypatch.chdir(repo)
+        rc = rl.main(["-o", str(out_path), "--update-file", "mod_599.py"])
+        assert rc == 0
+        after = out_path.read_text(encoding="utf-8")
+        blocks_after, index_only_after = rl.parse_existing_map(after)
+        total_after = len(blocks_after) + len(index_only_after)
+        assert total_after == file_count, (
+            f"增量更新后应该仍然追踪到全部 {file_count} 个文件，"
+            f"实际只有 {total_after} 个——文件在更新过程中丢失了"
+        )
+        # 被更新的文件本身应该拿到完整 block（不管它更新前是哪种状态）
+        assert "mod_599.py" in blocks_after
+
     def test_incremental_index_matches_full_regeneration(self, tmp_path, monkeypatch):
         repo = make_repo(tmp_path)
         out_path = tmp_path / "REPOMAP.md"

@@ -74,6 +74,62 @@ INDENT_WIDTH = 4  # 输出中统一用 4 空格模拟嵌套
 # 是一个"明显偏大，值得引起注意"的量级，用户可以按需调整自己的判断。
 LARGE_OUTPUT_LINE_WARNING_THRESHOLD = 10000
 
+# 上面这条"只警告不拦截"的策略，在真正超大仓库（数万文件级）上不够用——
+# 用户反馈的具体场景：agent 直接把 REPOMAP.md 整个读进上下文，如果这份
+# 地图本身是几MB到几十MB（真实测过 TypeScript 编译器仓库，31000+文件，
+# 输出到过 13.8MB/44万行这个量级），要么读取工具本身因为文件过大直接
+# 失败/截断（agent 拿到一份不完整但自己不知道的内容，反而比"警告后仍然
+# 给你完整东西"更危险——早期那条设计理由这里不再成立，因为原来假设的
+# "完整但大"的风险，在这个规模下已经变成"读的时候直接读不完整/读不了"，
+# 前提条件变了，结论也要跟着变），要么读取本身"成功"但吃掉了对话里几乎
+# 全部可用上下文，只为了换来一份没人会真正逐条查看的超长符号列表——
+# 花了巨大的 token 成本，边际价值却趋近于零（第29000个文件的符号列表，
+# 不会比排在前面的重要文件更值得占用上下文）。
+#
+# 解决思路不是"更狠地截断"，而是**改变超大仓库场景下默认产出的形态**：
+# 索引段（文件路径+符号数，见 render_index）本身开销很小、且不管仓库
+# 多大都能完整生成（一个文件一行，纯计数，不含符号细节），真正占体积的
+# 是每个文件的完整符号列表 block。累计输出字节数超过下面这个预算之后，
+# 后续文件**仍然出现在索引里**（用户/agent 依然能看到"这个文件存在，
+# 它有多少符号"这个事实，不会被静默漏掉），但不再展开完整的逐符号 block，
+# 只在索引后追加一段简短提示，说明如何针对某个具体文件单独拿到完整细节
+# （`--update-file`）或者按目录重新生成范围更小的地图（`--root`）。
+#
+# 这不是"更狠地截断"，是"把当前的产出形态从'一次性把所有细节都塞进一份
+# 文件'换成'先给一份完整但轻量的地图坐标，细节按需单独取'"——前者在
+# 仓库规模到达数万文件级时已经不再是一个安全默认值，后者对任何规模的
+# 仓库都成立，只是对小仓库而言这个预算几乎不会触发，行为等同于不变。
+#
+# 具体阈值：以"完整展开后的输出字节数"作为预算基准，不是符号数或行数。
+# 这是一次真实的自我纠正：最初这里用"符号总数"做预算单位，理由是"符号数
+# 已经算好、更直接反映内容有多少细节"——但用真实 Redis 语料实测验证时
+# 发现这个假设不成立：Redis 全量语料约17700个符号对应约1.08MB输出，
+# 平均每个符号约62字节，但这个"字节/符号"比例因语言、代码风格差异很大
+# （比如 Go 的单行 `func Foo()` 跟 C++ 带多个修饰符和模板参数的签名，
+# 字节数可以差好几倍）。用符号数做预算，在验证阶段拿一个平均字节数偏高的
+# 语料测试时，50000个符号的预算实际对应了超过3MB的输出——完全没有达到
+# "把体积控制在一个安全范围"这个预算机制本来要解决的问题，因为衡量单位
+# 从一开始就选错了：真正决定"agent 读这个文件会不会有问题"的是字节数
+# 本身，不是符号数这个间接代理指标。改成直接以字节数为预算之后，不管
+# 语言/代码风格如何变化，预算达到的效果都是直接、可预期的。
+#
+# 2MB 这个数字不是精确科学，是"明显超出正常单次对话上下文预算，值得
+# 强制降级"的量级——对比：真实测过的 Redis 全量语料（含全部依赖库）约
+# 1.1MB，TypeScript 编译器这种数万文件级仓库测出过 13.8MB，2MB 大致是
+# 二者之间、能覆盖绝大多数正常大小仓库、又确实会在真正超大仓库上触发
+# 降级的分界点。可以用 `--full-detail-budget-bytes` 调整，或者用
+# `--force-full-detail` 完全关闭这个降级、强制展开全部内容（用户明确
+# 知道自己想要什么、愿意承担相应风险时使用）。
+DEFAULT_FULL_DETAIL_BYTE_BUDGET = 2 * 1024 * 1024
+
+# 索引段本身的展示上限（按文件数，不是符号数）。理由见 render_index 的
+# 文档字符串——真实测过一万文件规模的仓库，索引段本身能长到约23万字符，
+# 即使已经不展开逐符号细节，这个规模也不再是"扫一眼建立心智地图"该有的
+# 开销。500 这个数字不是精确科学，是"一次性看完仍然可行、又能覆盖绝大多数
+# 中大型仓库真实文件数"的量级；超过这个规模的仓库本身也是
+# full_detail_byte_budget 更可能触发的场景，两个机制天然配合。
+DEFAULT_INDEX_MAX_ENTRIES = 500
+
 
 # --------------------------------------------------------------------------
 # 数据结构
@@ -435,16 +491,38 @@ def render_filemap(fm: FileMap) -> str:
     return "\n".join(out_lines)
 
 
-def render_index(entries: list[tuple[str, int]]) -> str:
-    """渲染顶部文件清单（索引段）：每个文件的符号数，从多到少排序。
+def render_index(entries: list[tuple[str, int]], max_entries: Optional[int] = None) -> str:
+    """
+    渲染顶部文件清单（索引段）：每个文件的符号数，从多到少排序。
 
     放在 REPOMAP.md 最顶部（来源标记之后、逐文件 block 之前），让 agent
     冷启动时先看到整个仓库摊开在哪、哪些文件是重点，再按需下钻到具体
     block。符号数是"该文件提取到的符号（函数/类/结构体等）数量"。
+
+    max_entries 是索引本身最多展示的文件数（None 表示不设上限，展示全部）。
+    这是补上"符号总数预算能防止逐符号 block 无限膨胀，但索引本身在文件
+    数量极多的仓库（数万文件级）下依然可能长到几百KB甚至更多"这个问题——
+    用真实数据验证过：一个一万文件的仓库，光是索引段就有约23万字符，
+    虽然远小于展开全部符号细节的体积，但已经不是"扫一眼"级别的开销了。
+
+    截断规则：按符号数从多到少排序后，只展示前 max_entries 个（这些通常
+    是最值得关注的文件），其余的**不逐条列出**，但用一行聚合信息交代
+    "还有多少文件、总共多少符号"，不是完全不提——这是跟上面
+    full_detail_byte_budget 截断逐符号 block 时同样的原则："可以不展开
+    细节，但不能让一批文件的存在完全从产出物里消失、用户/agent 无从得知"。
     """
     lines = ["<!-- 索引：文件清单 · 符号数（从多到少），供快速定位重点文件 -->"]
-    for path, count in sorted(entries, key=lambda x: (-x[1], x[0])):
+    ordered = sorted(entries, key=lambda x: (-x[1], x[0]))
+    shown = ordered if max_entries is None else ordered[:max_entries]
+    for path, count in shown:
         lines.append(f"{count:3d}  {path}")
+    remaining = ordered[len(shown):]
+    if remaining:
+        remaining_symbol_total = sum(c for _, c in remaining)
+        lines.append(
+            f"<!-- 还有 {len(remaining)} 个文件（共 {remaining_symbol_total} 个符号）未在索引里逐条列出，"
+            f"用 --index-max-entries 调大索引展示上限可以看到更多 -->"
+        )
     return "\n".join(lines)
 
 
@@ -469,7 +547,33 @@ def extract_symbol_count(block: str) -> int:
     return n
 
 
-def render_repomap(filemaps: list[FileMap]) -> str:
+def render_repomap(
+    filemaps: list[FileMap],
+    full_detail_byte_budget: Optional[int] = DEFAULT_FULL_DETAIL_BYTE_BUDGET,
+    index_max_entries: Optional[int] = DEFAULT_INDEX_MAX_ENTRIES,
+) -> str:
+    """
+    渲染完整的 REPOMAP.md 文本。
+
+    full_detail_byte_budget 是"完整展开逐符号 block"的总预算（按渲染后
+    的 UTF-8 字节数计），None 表示不设预算、始终展开全部内容（对应
+    --force-full-detail）。超过预算之后，后续文件不再展开完整 block，
+    但仍然出现在顶部索引里（带真实符号数），并在索引之后追加一段简短
+    说明，指出还有多少文件/多少符号被这样处理，以及如何单独获取它们的
+    完整细节——保证"这份地图在超大仓库场景下体积可控"的同时，不静默丢失
+    任何文件的存在信息，这是跟"直接截断/直接丢弃"的关键区别（见上方
+    DEFAULT_FULL_DETAIL_BYTE_BUDGET 的详细说明，包括"为什么用字节数而不是
+    符号数"这个真实踩过的坑）。
+
+    预算判断按文件在 filemaps 里出现的顺序累加（不是先排序再决定谁能进
+    预算），这样最终决定"哪些文件展开、哪些只留在索引里"的是文件被扫描到
+    的顺序（通常是目录遍历的自然顺序），不是"挑出全仓库里最重要的头部
+    文件展开、其余全部收起来"这种重新排序——后者虽然听起来更"智能"，但会
+    让"是否展开"这件事依赖一次额外的全局排序和阈值判断，语义上更复杂，
+    也更难向用户解释"为什么这个文件展开了，那个没有"；按扫描顺序简单累加，
+    规则简单直白，用户从命令行参数（--root、--max-files）就能直接控制
+    实际效果，不需要额外理解一套排序规则。
+    """
     header = [
         SOURCE_MARKER,
         f"<!-- generated_at: {time.strftime('%Y-%m-%d %H:%M:%S')} -->",
@@ -477,16 +581,43 @@ def render_repomap(filemaps: list[FileMap]) -> str:
     ]
     blocks = []
     entries = []
+    cumulative_bytes = 0
+    truncated_file_count = 0
+    truncated_symbol_count = 0
+    budget_exceeded = False
+
     for fm in filemaps:
+        if fm.skipped_reason is not None:
+            continue
+        symbol_count = len(fm.symbols)
+        entries.append((fm.path, symbol_count))
+
+        if full_detail_byte_budget is not None and cumulative_bytes >= full_detail_byte_budget:
+            budget_exceeded = True
+            truncated_file_count += 1
+            truncated_symbol_count += symbol_count
+            continue
+
         rendered = render_filemap(fm)
         if rendered:
             blocks.append(rendered)
-            entries.append((fm.path, len(fm.symbols)))
-    index = render_index(entries) if entries else ""
+            cumulative_bytes += len(rendered.encode("utf-8"))
+
+    index = render_index(entries, max_entries=index_max_entries) if entries else ""
     body = "\n\n".join(blocks)
     out = "\n".join(header)
     if index:
         out += index + "\n\n"
+    if budget_exceeded:
+        out += (
+            f"<!-- 已展开约 {cumulative_bytes / 1024:.0f}KB 内容（预算 {full_detail_byte_budget / 1024:.0f}KB），"
+            f"剩余 {truncated_file_count} 个文件（共 {truncated_symbol_count} 个符号）"
+            f"只出现在上方索引里，未展开完整内容。"
+            f"针对具体文件单独获取完整细节：--update-file <path>；"
+            f"或用 --root 缩小扫描范围重新生成；"
+            f"或用 --full-detail-budget-bytes 调大预算；"
+            f"或用 --force-full-detail 完全关闭这个限制。 -->\n\n"
+        )
     out += body + ("\n" if body else "")
     return out
 
@@ -495,17 +626,41 @@ def render_repomap(filemaps: list[FileMap]) -> str:
 # 增量更新：解析已有 REPOMAP.md，替换/插入单个文件的 block
 # --------------------------------------------------------------------------
 
-def parse_existing_blocks(content: str) -> dict[str, str]:
+def parse_existing_map(content: str) -> tuple[dict[str, str], list[tuple[str, int]]]:
+    """解析已有 REPOMAP.md，返回 (blocks, index_only)。
+
+    - blocks: path -> 渲染后的 block 文本（完整展开的文件）
+    - index_only: [(path, count), ...] —— 只出现在顶部索引里、没有完整 block
+      的文件（预算降级时被截断的那部分）。增量更新重建时这些文件必须保留在
+      索引里，否则它们会从地图里静默消失（历史 bug：预算降级 + --update-file
+      组合导致被截断文件全部丢失）。
+    """
     blocks: dict[str, str] = {}
-    body_lines = content.splitlines()
+    index_only: list[tuple[str, int]] = []
+    lines = content.splitlines()
+
+    # 1) 解析顶部索引段：'<!-- 索引：' 标记之后的 '  NNN  path' 行
+    for i, line in enumerate(lines):
+        if line.startswith("<!-- 索引："):
+            j = i + 1
+            while j < len(lines):
+                lj = lines[j]
+                if lj.startswith("<!--") or lj.strip() == "":
+                    break
+                m = re.match(r"^\s*(\d+)\s{2,}(\S.*)$", lj)
+                if not m:
+                    break
+                index_only.append((m.group(2), int(m.group(1))))
+                j += 1
+            break
+
+    # 2) 解析完整 block（原有逻辑：从第一个非注释非空行开始，按空行切块）
     start_idx = 0
-    for idx, line in enumerate(body_lines):
+    for idx, line in enumerate(lines):
         if not line.strip().startswith("<!--") and line.strip() != "":
             start_idx = idx
             break
-    body = "\n".join(body_lines[start_idx:])
-
-    import re
+    body = "\n".join(lines[start_idx:])
 
     raw_blocks = re.split(r"\n\n+", body.strip())
     for rb in raw_blocks:
@@ -516,16 +671,34 @@ def parse_existing_blocks(content: str) -> dict[str, str]:
         if first_line.endswith(":"):
             path = first_line[:-1]
             blocks[path] = rb
-    return blocks
+
+    # 3) index_only 只保留没有完整 block 的文件（有 block 的以 block 为准）
+    index_only = [(p, c) for p, c in index_only if p not in blocks]
+    return blocks, index_only
 
 
 def update_single_file(repomap_path: Path, root: Path, update_file: Path, skip_generated: bool = True) -> str:
+    """
+    增量更新单个文件对应的 block，不应用 render_repomap 里的
+    full_detail_byte_budget 截断逻辑——原因：增量更新操作的对象是
+    "这一个文件"，不是重新决定"整个仓库里哪些文件该展开、哪些不该"，
+    对单文件更新套用一个基于全仓库输出字节数的预算，语义上说不通（如果
+    这次更新恰好让累计字节数跨过预算线，突然把这次更新的文件也收起来，
+    这个行为对用户来说会很意外，也偏离了"我只是想更新这一个文件"的
+    初衷）。全量重新生成（不带 --update-file）时预算逻辑才生效，见
+    render_repomap 的说明。
+
+    注意：预算降级后生成的地图里，被截断的文件只存在于顶部索引、没有
+    完整 block。增量更新必须把它们从索引里保留下来（parse_existing_map
+    返回的 index_only），否则这些文件会从地图里静默消失（历史 bug：
+    预算降级 + --update-file 组合导致全部被截断文件丢失）。
+    """
     if repomap_path.exists():
         existing = repomap_path.read_text(encoding="utf-8")
     else:
         existing = ""
 
-    blocks = parse_existing_blocks(existing) if existing else {}
+    blocks, index_only = parse_existing_map(existing) if existing else ({}, [])
 
     fm = build_filemap(update_file, root, skip_generated=skip_generated)
     rel = fm.path
@@ -535,6 +708,9 @@ def update_single_file(repomap_path: Path, root: Path, update_file: Path, skip_g
         blocks[rel] = rendered
     else:
         blocks.pop(rel, None)
+    # rel 若是之前被截断（在 index_only 里），现在已单独展开或删除，
+    # 不再以"仅索引"条目保留
+    index_only = [(p, c) for p, c in index_only if p != rel]
 
     header = [
         SOURCE_MARKER,
@@ -542,12 +718,21 @@ def update_single_file(repomap_path: Path, root: Path, update_file: Path, skip_g
         "",
     ]
     ordered_paths = sorted(blocks.keys())
-    entries = [(p, extract_symbol_count(blocks[p])) for p in ordered_paths]
+    entries = [(p, extract_symbol_count(blocks[p])) for p in ordered_paths] + index_only
     index = render_index(entries) if entries else ""
     body = "\n\n".join(blocks[p] for p in ordered_paths)
     out = "\n".join(header)
     if index:
         out += index + "\n\n"
+    if index_only:
+        # 仍有被截断（仅索引）的文件，重新生成降级提示，保持地图诚实
+        remaining_total = sum(c for _, c in index_only)
+        out += (
+            f"<!-- 增量更新后仍有 {len(index_only)} 个文件（共 {remaining_total} 个符号）"
+            f"只出现在上方索引里，未展开完整内容。"
+            f"针对具体文件单独获取完整细节：--update-file <path>；"
+            f"或用 --root 缩小扫描范围重新生成。 -->\n\n"
+        )
     out += body + ("\n" if body else "")
     return out
 
@@ -576,6 +761,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="不跳过标注了\"Code generated ... DO NOT EDIT\"等自动生成标记的文件"
                          "（默认会跳过这类文件，见 references/known_limitations.md 里"
                          "自动生成文件检测那一节）")
+    p.add_argument("--full-detail-budget-bytes", type=int, default=DEFAULT_FULL_DETAIL_BYTE_BUDGET,
+                    help=f"完整展开逐符号 block 的总字节数预算，默认 {DEFAULT_FULL_DETAIL_BYTE_BUDGET}"
+                         f"（约 {DEFAULT_FULL_DETAIL_BYTE_BUDGET // 1024 // 1024}MB）。"
+                         "超出预算的文件仍会出现在顶部索引里（带真实符号数），但不再展开完整内容，"
+                         "见 SKILL.md 里\"超大仓库\"一节的说明")
+    p.add_argument("--force-full-detail", action="store_true",
+                    help="完全关闭 --full-detail-budget-bytes 限制，不管仓库多大都展开全部文件的完整内容"
+                         "（可能产出体积很大的文件，明确知道自己需要完整内容时使用）")
+    p.add_argument("--index-max-entries", type=int, default=DEFAULT_INDEX_MAX_ENTRIES,
+                    help=f"顶部索引最多展示的文件数，默认 {DEFAULT_INDEX_MAX_ENTRIES}（按符号数从多到少排序，"
+                         "超出部分只给出聚合计数，不逐条列出；传 0 表示不设上限，展示全部文件）")
     p.add_argument("--update-file", type=str, default=None,
                     help="只重新解析该单个文件并合并回已有 REPOMAP.md（增量更新模式）")
     p.add_argument("--root", type=str, default=".",
@@ -621,6 +817,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not update_target.exists():
             print(f"错误：--update-file 指定的文件不存在: {update_target}", file=sys.stderr)
             return 1
+        try:
+            update_target.relative_to(repo_root)
+        except ValueError:
+            print(
+                f"错误：--update-file 指定的文件不在仓库根目录内: {update_target}（仓库根: {repo_root}）。"
+                f"增量更新只支持更新仓库内的文件。",
+                file=sys.stderr,
+            )
+            return 1
         if find_adapter_for(update_target) is None:
             print(f"警告：{update_target} 没有匹配的语言适配器，跳过", file=sys.stderr)
             return 1
@@ -638,7 +843,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     for f in iter_source_files(scan_root, repo_root, exclude_dirs, args.max_files, gitignore_matcher):
         filemaps.append(build_filemap(f, repo_root, skip_generated=not args.include_generated))
 
-    content = render_repomap(filemaps)
+    content = render_repomap(
+        filemaps,
+        full_detail_byte_budget=None if args.force_full_detail else args.full_detail_budget_bytes,
+        index_max_entries=None if args.index_max_entries == 0 else args.index_max_entries,
+    )
 
     line_count = content.count("\n")
     if line_count > LARGE_OUTPUT_LINE_WARNING_THRESHOLD:

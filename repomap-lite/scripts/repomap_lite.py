@@ -419,7 +419,7 @@ def render_filemap(fm: FileMap) -> str:
     if fm.skipped_reason is not None:
         return ""  # 空文件/无符号文件/不支持的文件 一律跳过，不生成 block
 
-    out_lines = [f"{fm.path}:", "⋮"]
+    out_lines = [f"{fm.path}:", f"<!-- symbols: {len(fm.symbols)} -->", "⋮"]
     for sym in fm.symbols:
         indent = " " * (INDENT_WIDTH * sym.depth)
         # sym.name 通常是单行，但个别适配器（例如 C 系语言里"返回类型独占一行，
@@ -435,6 +435,40 @@ def render_filemap(fm: FileMap) -> str:
     return "\n".join(out_lines)
 
 
+def render_index(entries: list[tuple[str, int]]) -> str:
+    """渲染顶部文件清单（索引段）：每个文件的符号数，从多到少排序。
+
+    放在 REPOMAP.md 最顶部（来源标记之后、逐文件 block 之前），让 agent
+    冷启动时先看到整个仓库摊开在哪、哪些文件是重点，再按需下钻到具体
+    block。符号数是"该文件提取到的符号（函数/类/结构体等）数量"。
+    """
+    lines = ["<!-- 索引：文件清单 · 符号数（从多到少），供快速定位重点文件 -->"]
+    for path, count in sorted(entries, key=lambda x: (-x[1], x[0])):
+        lines.append(f"{count:3d}  {path}")
+    return "\n".join(lines)
+
+
+_SYMBOL_COUNT_RE = re.compile(r"^<!-- symbols: (\d+) -->", re.M)
+
+
+def extract_symbol_count(block: str) -> int:
+    """从渲染后的 block 文本提取该文件的符号数。
+
+    优先读 block 内的 `<!-- symbols: N -->` 注释（render_filemap 生成）。
+    兼容旧版（升级前生成的 REPOMAP.md 没有该注释）：退回粗略统计
+    `│` 前缀行（docstring 行除外）。多行签名会多算几行，仅作索引用，
+    精度要求不高；下一次全量生成即恢复精确计数。
+    """
+    m = _SYMBOL_COUNT_RE.search(block)
+    if m:
+        return int(m.group(1))
+    n = 0
+    for line in block.splitlines():
+        if line.startswith("│") and not re.match(r"^│\s*(\"\"\"|\'\'\')", line):
+            n += 1
+    return n
+
+
 def render_repomap(filemaps: list[FileMap]) -> str:
     header = [
         SOURCE_MARKER,
@@ -442,11 +476,19 @@ def render_repomap(filemaps: list[FileMap]) -> str:
         "",
     ]
     blocks = []
+    entries = []
     for fm in filemaps:
         rendered = render_filemap(fm)
         if rendered:
             blocks.append(rendered)
-    return "\n".join(header) + "\n\n".join(blocks) + ("\n" if blocks else "")
+            entries.append((fm.path, len(fm.symbols)))
+    index = render_index(entries) if entries else ""
+    body = "\n\n".join(blocks)
+    out = "\n".join(header)
+    if index:
+        out += index + "\n\n"
+    out += body + ("\n" if body else "")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -500,8 +542,14 @@ def update_single_file(repomap_path: Path, root: Path, update_file: Path, skip_g
         "",
     ]
     ordered_paths = sorted(blocks.keys())
+    entries = [(p, extract_symbol_count(blocks[p])) for p in ordered_paths]
+    index = render_index(entries) if entries else ""
     body = "\n\n".join(blocks[p] for p in ordered_paths)
-    return "\n".join(header) + (body + "\n" if body else "")
+    out = "\n".join(header)
+    if index:
+        out += index + "\n\n"
+    out += body + ("\n" if body else "")
+    return out
 
 
 # --------------------------------------------------------------------------

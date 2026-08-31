@@ -189,45 +189,84 @@ def _gitignore_pattern_to_regex(pattern: str) -> tuple[re.Pattern, bool, bool]:
 
 class GitignoreMatcher:
     """
-    聚合仓库内全部 .gitignore 文件（含嵌套）的规则，提供一个
-    `is_ignored(path_relative_to_repo_root, is_dir)` 判断接口。
+    聚合仓库内全部 .gitignore（以及可选的 .repomapignore，见下）文件（含
+    嵌套）的规则，提供一个 `is_ignored(path_relative_to_repo_root, is_dir)`
+    判断接口。
 
-    每条规则记录它所在的 .gitignore 文件相对仓库根目录的目录前缀，
-    判断时只应用"规则文件所在目录 == 待判断路径的前缀目录"的规则，
-    这是 git 嵌套 .gitignore 的核心语义（子目录的规则只影响子树）。
+    每条规则记录它所在的忽略文件相对仓库根目录的目录前缀，判断时只应用
+    "规则文件所在目录 == 待判断路径的前缀目录"的规则，这是 git 嵌套
+    .gitignore 的核心语义（子目录的规则只影响子树），`.repomapignore`
+    复用同一套语义。
+
+    `.repomapignore` 是什么、为什么需要一个独立于 `.gitignore` 的文件：
+    `.gitignore` 回答的是"这个路径要不要被 git 追踪"，`.repomapignore`
+    回答的是一个不同的问题——"这个路径要不要出现在结构地图里"。两者不总是
+    一致：
+    - 项目里**确实提交到 git**的第三方代码快照/vendored 依赖、大批量的
+      测试 fixture、示例代码、迁移脚本历史记录——这些内容真实存在、
+      需要被版本控制，但对"这个项目实际是怎么写的"这个问题没有信息量，
+      不应该出现在给 agent 冷启动用的结构地图里。`.gitignore` 对这些
+      内容无能为力，因为它们本来就要被 git 追踪。
+    - 反过来，如果为了让地图排除它们就把这些路径也写进 `.gitignore`，
+      会把"版本控制关心什么"和"地图关心什么"这两个完全不同的意图混在
+      同一个文件里，后续任何人看 `.gitignore` 都要多想一层"这条规则是
+      为了不追踪，还是只是为了不出现在地图里"，增加维护负担。
+
+    什么时候该用 `.repomapignore`（而不是试图塞进 `.gitignore`）：
+    - 内容**已经**被 git 追踪，但不想出现在地图里（上面提到的场景）
+    - 内容不满足任何已支持语言的"自动生成文件"内容标记检测
+      （见 references/known_limitations.md 的相关章节），但项目组自己
+      知道这是生成物/不需要理解的内容
+    - 需要针对"这个地图给 agent 用"这个场景单独调整排除范围，而不想
+      影响其他工具（IDE、CI、部署脚本）对同一批文件的处理方式
+
+    是否需要自动维护/更新：不需要，也不应该。这是一份跟 `.gitignore`
+    地位相同的、项目组主动维护的静态配置——工具不会自动往里面加东西，
+    原因是"自动判断某个路径不值得放进地图"本质上是一个需要人类/项目
+    意图介入的判断，自动化的话风险是新增的真实代码被意外归类为"不值得
+    展示"而悄悄从地图里消失，且没人会注意到，这比"忘记排除某个生成目录、
+    地图里多了点噪音"要严重得多。
     """
+
+    IGNORE_FILENAMES = (".gitignore", ".repomapignore")
 
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
         # 每条规则: (适用的目录前缀(相对根目录, '' 表示根目录本身),
         #            正则, 是否否定模式, 是否仅目录)
         self._rules: list[tuple[str, re.Pattern, bool, bool]] = []
-        self._load_all_gitignores()
+        self._load_all_ignore_files()
 
-    def _load_all_gitignores(self) -> None:
+    def _load_all_ignore_files(self) -> None:
         for dirpath, dirnames, filenames in os.walk(self.repo_root):
             dirnames[:] = [d for d in dirnames if d != ".git"]
-            if ".gitignore" not in filenames:
-                continue
-            gitignore_path = Path(dirpath) / ".gitignore"
             prefix = str(Path(dirpath).relative_to(self.repo_root))
             if prefix == ".":
                 prefix = ""
-            try:
-                content = gitignore_path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            for line in content.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
+            # 按固定顺序读取（先 .gitignore 再 .repomapignore），保证同一
+            # 目录内 .repomapignore 的规则排在 .gitignore 之后——如果两者
+            # 都对同一路径有否定模式，后加载的生效，这跟 git 对同一个
+            # .gitignore 文件内"后面的规则覆盖前面"的顺序语义保持一致，
+            # 只是把这个顺序关系扩展到两个文件之间。
+            for ignore_filename in self.IGNORE_FILENAMES:
+                if ignore_filename not in filenames:
                     continue
-                negate = line.startswith("!")
-                if negate:
-                    line = line[1:]
-                if not line:
+                ignore_path = Path(dirpath) / ignore_filename
+                try:
+                    content = ignore_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
                     continue
-                regex, dir_only, _anchored = _gitignore_pattern_to_regex(line)
-                self._rules.append((prefix, regex, negate, dir_only))
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    negate = line.startswith("!")
+                    if negate:
+                        line = line[1:]
+                    if not line:
+                        continue
+                    regex, dir_only, _anchored = _gitignore_pattern_to_regex(line)
+                    self._rules.append((prefix, regex, negate, dir_only))
 
     def is_ignored(self, rel_path: str, is_dir: bool) -> bool:
         """
@@ -283,18 +322,44 @@ class GitignoreMatcher:
 
 
 def iter_source_files(
-    root: Path,
+    scan_root: Path,
+    repo_root: Path,
     exclude_dirs: set[str],
     max_files: Optional[int] = None,
     gitignore: Optional["GitignoreMatcher"] = None,
 ):
+    """
+    遍历 scan_root 子树下的源文件。scan_root 和 repo_root 是两个不同的
+    概念，刻意分开：
+
+    - repo_root：`.git` 所在的仓库根目录，`.gitignore`/`.repomapignore`
+      的规则本身是相对这个目录写的（git 的真实语义如此），输出里展示的
+      文件路径也是相对这个目录的相对路径。
+    - scan_root：实际要遍历的起点，可以等于 repo_root（默认情况），也
+      可以是仓库内的任意子目录——这是给 monorepo 场景用的："只想看
+      packages/some-package/ 这个子项目的结构地图，不想扫全仓库"。
+
+    早期版本没有这个区分，`--root` 参数虽然存在，但 `find_repo_root()`
+    总是从给定路径向上找到 `.git` 所在处并把这个结果同时当作"遍历起点"
+    和"路径基准"，导致在 `--root packages/pkg-a` 这种子目录场景下，
+    实际行为退化成"遍历整个仓库"，`--root` 参数名字暗示的"限定扫描范围"
+    完全没有生效——用真实的 monorepo 场景复现确认过这个 bug：从子包
+    目录下运行工具，本以为只会得到该子包自己的符号，实际拿到的是整个
+    仓库的地图，混入了其他子包的内容。
+
+    修复后，`.gitignore` 判断和输出路径展示继续以 repo_root 为基准
+    （保持跟 git 语义一致，也保持 REPOMAP.md 里路径的可读性——即使只扫
+    一个子包，路径也应该是 `packages/pkg-a/src/foo.py` 这种完整仓库
+    相对路径，而不是把子包自己的相对路径当成仓库根，那样反而更容易让人
+    误解这是整个仓库的结构），只有"遍历从哪里开始"改成 scan_root。
+    """
     count = 0
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(scan_root):
         dirnames[:] = [d for d in dirnames if d not in exclude_dirs and not d.startswith(".git")]
         if gitignore is not None:
             kept_dirnames = []
             for d in dirnames:
-                dir_rel = str((Path(dirpath) / d).relative_to(root))
+                dir_rel = str((Path(dirpath) / d).relative_to(repo_root))
                 if gitignore.is_ignored(dir_rel, is_dir=True):
                     continue
                 kept_dirnames.append(d)
@@ -302,7 +367,7 @@ def iter_source_files(
         for fname in sorted(filenames):
             path = Path(dirpath) / fname
             if gitignore is not None:
-                file_rel = str(path.relative_to(root))
+                file_rel = str(path.relative_to(repo_root))
                 if gitignore.is_ignored(file_rel, is_dir=False):
                     continue
             if find_adapter_for(path) is not None:
@@ -455,8 +520,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-vendor", action="store_true",
                     help="不排除 node_modules/vendor/dist/.git/bin/obj 等默认目录")
     p.add_argument("--no-gitignore", action="store_true",
-                    help="不读取仓库内的 .gitignore 规则（默认会读取并排除匹配的文件/目录，"
-                         "跟 --include-vendor 是两套独立的排除机制，可以分别关闭）")
+                    help="不读取仓库内的 .gitignore 和 .repomapignore 规则（默认会读取并排除"
+                         "匹配的文件/目录，跟 --include-vendor 是两套独立的排除机制，"
+                         "可以分别关闭；.repomapignore 语法跟 .gitignore 完全一致，用于排除"
+                         "\"已被 git 追踪、但不想出现在地图里\"的内容，见 SKILL.md 的说明）")
     p.add_argument("--include-generated", action="store_true",
                     help="不跳过标注了\"Code generated ... DO NOT EDIT\"等自动生成标记的文件"
                          "（默认会跳过这类文件，见 references/known_limitations.md 里"
@@ -464,7 +531,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--update-file", type=str, default=None,
                     help="只重新解析该单个文件并合并回已有 REPOMAP.md（增量更新模式）")
     p.add_argument("--root", type=str, default=".",
-                    help="起始目录，默认为当前目录（会向上查找 git 仓库根目录）")
+                    help="扫描范围的起点，默认为当前目录。仍然会向上查找 .git 所在的仓库根目录"
+                         "（.gitignore/.repomapignore 规则和输出里的文件路径始终相对仓库根目录，"
+                         "保持跟 git 语义一致），但实际遍历只会限定在这个起点的子树内——用于"
+                         "monorepo 场景，只想生成某个子包/子目录自己的结构地图时指定")
     p.add_argument("--list-adapters", action="store_true",
                     help="列出当前已注册的语言适配器及其覆盖的扩展名，然后退出")
     return p
@@ -485,8 +555,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         _print_adapter_list()
         return 0
 
-    start_path = Path(args.root).resolve()
-    repo_root = find_repo_root(start_path)
+    scan_root = Path(args.root).resolve()
+    repo_root = find_repo_root(scan_root)
     if repo_root is None:
         print(
             "错误：未找到 .git 目录，本工具需要在 git 仓库内（或其子目录）运行。",
@@ -517,7 +587,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     exclude_dirs = set() if args.include_vendor else DEFAULT_EXCLUDE_DIRS
     gitignore_matcher = None if args.no_gitignore else GitignoreMatcher(repo_root)
     filemaps = []
-    for f in iter_source_files(repo_root, exclude_dirs, args.max_files, gitignore_matcher):
+    for f in iter_source_files(scan_root, repo_root, exclude_dirs, args.max_files, gitignore_matcher):
         filemaps.append(build_filemap(f, repo_root, skip_generated=not args.include_generated))
 
     content = render_repomap(filemaps)

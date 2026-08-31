@@ -1,6 +1,6 @@
 ---
 name: repomap-lite
-description: "Use when entering an unfamiliar codebase and needing a structural overview, or when the user asks to \"map the codebase\", \"understand the project structure\", \"generate a repo map\", or wants a REPOMAP.md. Generates a zero-dependency structural map (top-level functions, classes, structs, interfaces, nesting) for fast cold-start orientation, covering Python, JS/TS, Vue, Go, Rust, Ruby, C#, Java, C/C++ (incl. Qt), shaders, and Makefile/Dockerfile in one pass. No third-party packages."
+description: Use when entering an unfamiliar codebase, or when the user asks to map/understand a project's structure or wants a REPOMAP.md. Generates a zero-dependency structural map (top-level functions, classes, structs, interfaces, nesting) for fast cold-start orientation, covering Python, JS/TS, Go, Rust, Ruby, C#, Java, C/C++, shaders, and Makefile/Dockerfile in one pass. No third-party packages.
 ---
 
 # repomap-lite
@@ -71,7 +71,7 @@ python3 scripts/repomap_lite.py -o REPOMAP.md --max-files 50
 # 包含 node_modules/vendor/dist/bin/obj 等默认排除目录
 python3 scripts/repomap_lite.py -o REPOMAP.md --include-vendor
 
-# 不读取仓库的 .gitignore（默认会读取，见下方说明）
+# 不读取仓库的 .gitignore/.repomapignore（默认都会读取，见下方说明）
 python3 scripts/repomap_lite.py -o REPOMAP.md --no-gitignore
 
 # 包含标注了自动生成标记的文件（默认会跳过，见下方说明）
@@ -79,6 +79,9 @@ python3 scripts/repomap_lite.py -o REPOMAP.md --include-generated
 
 # 单文件改动后增量更新，不用全量重扫
 python3 scripts/repomap_lite.py -o REPOMAP.md --update-file src/foo.py
+
+# 只扫某个子目录（monorepo 场景，见下方"按范围生成"）
+python3 scripts/repomap_lite.py --root packages/some-package -o packages/some-package/REPOMAP.md
 
 # 查看当前已注册的语言适配器
 python3 scripts/repomap_lite.py --list-adapters
@@ -115,6 +118,119 @@ protobuf/gRPC 生成代码的标记注释）声明身份。默认会检测并跳
 工具输出验证过，Java 基于标准注解规范实现但未用真实工具验证，C#/C++
 暂未实现。新增语言的生成文件识别，只需要在对应适配器里补一个方法，
 不需要改动核心代码，见 `references/adapter_guide.md`。
+
+## 自定义排除：`.repomapignore`
+
+`.gitignore` 回答"这个路径要不要被 git 追踪"，`.repomapignore` 回答一个
+不同的问题——"这个路径要不要出现在结构地图里"。两者不总是一致，需要
+`.repomapignore` 的典型场景：
+
+- 项目里**确实提交到 git**的第三方代码快照、vendored 依赖、大批量测试
+  fixture、示例代码——这些内容真实存在、需要被版本控制，但对"这个项目
+  实际是怎么写的"这个问题没有信息量，`.gitignore` 对它们无能为力
+  （因为它们本来就该被追踪）
+- 内容不满足任何已支持语言的"自动生成文件"标记检测（见上文），但项目组
+  自己知道这是生成物/不需要理解的内容
+- 想针对"这份地图给 agent 用"这个场景单独调整排除范围，不想牵连 IDE/
+  CI/部署脚本对同一批文件的处理方式
+
+语法跟 `.gitignore` 完全一致（含嵌套子目录、通配符、否定模式），一份
+`.repomapignore` 只管它所在目录及子树。用法：
+
+```bash
+# 项目根目录（或任意子目录）新建 .repomapignore
+echo "vendored_snapshot/" >> .repomapignore
+echo "legacy_examples/" >> .repomapignore
+
+# 不想让 .repomapignore 生效时，跟 .gitignore 共用同一个开关
+python3 scripts/repomap_lite.py -o REPOMAP.md --no-gitignore
+```
+
+**不需要、也不应该自动维护这个文件**——排除规则是项目组主动决定并维护的
+静态配置，工具不会自动往里面加东西。原因：判断"某个路径不值得放进地图"
+本质上需要人类/项目意图介入；如果让工具自动判断，风险是新增的真实代码
+被意外归类为"不值得展示"而悄悄从地图消失，且没人会注意到——这比"忘记
+排除一个生成目录、地图里多了点噪音"严重得多。跟 `.gitignore` 一样，
+建议把 `.repomapignore` **提交到版本控制**，让排除规则本身成为团队共识
+而不是某个人本地的临时设置。
+
+## 按范围生成：`--root` 支持 monorepo 子项目地图
+
+`--root` 指定的是**扫描范围的起点**，可以是仓库根目录（默认），也可以是
+仓库内任意子目录——常见于 monorepo，只想看某个子包自己的结构：
+
+```bash
+cd packages/some-package
+python3 /path/to/scripts/repomap_lite.py --root . -o REPOMAP.md
+```
+
+`.gitignore`/`.repomapignore` 判断和输出里的文件路径始终相对**仓库根
+目录**（保持跟 git 语义一致，也让路径本身可读——即使只扫一个子包，
+路径也是 `packages/some-package/src/foo.py` 这种完整仓库相对路径，
+不会让人误以为这是整个仓库的地图）。想给多个子包分别生成地图，重复
+调用即可，各自指定 `--root` 和 `-o`：
+
+```bash
+for pkg in packages/*/; do
+  python3 scripts/repomap_lite.py --root "$pkg" -o "$pkg/REPOMAP.md"
+done
+```
+
+不需要一个专门的"多地图批量生成"功能——`--root` + `-o` 这两个已有参数
+组合起来就是这个工作流，没有必要为了同一件事再造一个新接口。
+
+## REPOMAP.md 要不要提交到版本控制？建议不要，当作可随时重新生成的临时产物
+
+**默认建议**：把 `REPOMAP.md` 加进 `.gitignore`，当作类似构建产物的东西
+——需要的时候现场生成，不提交。理由：
+
+- **过时的地图比没有地图更危险**。本工具生成的成本极低（本地脚本，
+  零外部依赖，秒级完成），比起"提交一份地图、寄希望于每次改代码后有人
+  记得重新生成并提交"，现场生成一次的确定性高得多。一份没跟上最新代码的
+  地图会让 agent 对着过时的结构做判断而不自知——这比"没有地图、多花一次
+  工具调用现场生成"的代价高得多。
+- **合并冲突**：两个分支各自改了代码结构，各自的地图内容也会不一样，
+  合并时地图文件本身几乎必然冲突，而这个冲突毫无意义（解决的时候你也不会
+  去手动合并两份符号列表，只会重新生成一遍）。
+
+**什么时候可以合理地反过来提交它**：如果团队的实际使用场景是"人和 agent
+都要看，且希望不需要额外一次生成步骤就能立刻打开"，或者仓库大到生成
+耗时不可忽略（本工具本身很快，但配合 `--max-files`/分包生成的策略之后，
+"完整走一遍生成流程"可能不再是纯粹的"随手就有"），提交也是合理选择——
+这是团队自己的取舍，本工具不做技术性阻拦，只给出默认建议和理由。如果
+决定提交，跟 `.repomapignore` 一样，建议明确写进项目约定，而不是有人
+提交有人不提交、地图和源码的一致性变得不可预期。
+
+## REPOMAP 是符号索引，不是架构文档——它能回答什么、不能回答什么
+
+REPOMAP 只保留"定义行本身+一层嵌套"，不含函数体、不含调用关系、不含
+跨文件的数据流向。用它能高效回答的问题：
+
+- 某个功能大概实现在哪个文件（先看符号名，再决定读哪个文件）
+- 一个文件/模块的顶层结构长什么样，有哪些类、哪些方法
+- 项目的模块边界在哪（哪些目录对应哪些子系统）
+- 构建/部署入口（Makefile 的 target、Dockerfile 的构建阶段、`main.py`/
+  `main.go`/`main.ts` 这类入口文件本身）
+
+它**回答不了**、需要另外读代码或读文档才能回答的问题：
+
+- 调用关系/依赖关系（"这个函数被谁调用""这条链路怎么串起来的"）
+- 路由/接口的语义（一个 API 端点具体的请求/响应结构）
+- 数据模型之间的关联（外键关系、字段含义）
+- 业务规则、安全逻辑这类"为什么这么写"的意图（防枚举、参数校验规则等）
+- 具体实现细节（某个第三方库怎么被集成、某段算法的具体逻辑）
+
+如果项目本身有 `AGENTS.md`/架构说明文档，两者不是互相替代关系，是互补：
+文档负责"为什么这么设计"，REPOMAP 负责"现在实际长什么样"——文档可能会
+因为没跟上重构而过时，REPOMAP 因为是从当前源码直接生成的，不会"撒谎"，
+但它也确实不试图捕捉意图和语义。冷启动一个新仓库时，合理的顺序是：
+先读项目自己的架构文档（如果有）建立"为什么"层面的心智模型，再用
+REPOMAP 建立"现在有什么、在哪"这层坐标，需要深入理解某个具体机制时
+再去读那几个关键文件的实际内容——不要指望仅凭 REPOMAP 就能回答"这个
+系统是怎么运转的"这类问题，那超出了这个工具的设计范围，需要真正去读
+代码或者用更重的工具（完整的静态分析/调用图生成，那是另一类工具要做的
+事，不建议往这个"零依赖、跨语言、秒级生成"的工具里塞，会牺牲掉它现在
+最大的优点）。
 
 ## 输出格式
 

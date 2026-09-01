@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from adapter_base import AdapterResult, Symbol, register
+from adapter_base import AdapterResult, Dependency, Symbol, register
 from adapter_utils import (
     BraceDepthTracker,
     line_is_brace_balanced,
@@ -58,6 +58,13 @@ class Dialect:
     # 表示这个方言暂不支持 is_generated 检测——这是如实反映"目前没有验证过
     # 这个语言的约定"，不是硬凑一个不确定的规则）。
     generated_markers: tuple["re.Pattern", ...] = ()
+    # 依赖声明的语法风格标识："include"（C/C++ 的 #include）、
+    # "import"（Java 的 import）、"using"（C# 的 using）。用字符串标识而不是
+    # 直接内联正则，是因为 C/C++ 的依赖识别还要处理条件编译（#ifdef/#endif）
+    # 这个 Java/C# 完全没有的概念，逻辑复杂度不对等，不适合塞进同一套
+    # 简单的"关键字 + 正则"参数化，见 extract_dependencies 里按
+    # dependency_kind 分派到不同实现的说明。
+    dependency_kind: str = ""
 
 
 # Java 的标准生成文件标记：`javax.annotation.processing.Generated` /
@@ -74,6 +81,60 @@ _JAVA_GENERATED_MARKERS = (
     re.compile(r"^\s*@(?:javax\.annotation\.processing\.|jakarta\.annotation\.)?Generated\("),
 )
 
+# --- 依赖识别 ---
+
+# C/C++ 的 #include，区分 <系统头文件> 和 "本地头文件"——这是 C/C++ 语法
+# 本身就带的、唯一能不靠额外信息就区分 internal/external 的直接线索：
+# 尖括号形式是编译器搜索路径（系统库/第三方库），双引号形式优先搜索当前
+# 目录（项目内部头文件的惯例写法，虽然预处理器规则允许双引号也去系统路径
+# 找，但这是极少数写法，绝大多数真实代码严格遵循"双引号=本地"这条约定）。
+CPP_INCLUDE_SYSTEM_RE = re.compile(r'^\s*#\s*include\s*<([^>]+)>')
+CPP_INCLUDE_LOCAL_RE = re.compile(r'^\s*#\s*include\s*"([^"]+)"')
+
+# 条件编译指令：只需要识别"开启一个条件编译区间"和"结束"这两类事件，
+# 不需要理解 #ifdef/#ifndef/#if 具体条件的真假（那需要真正的预处理器），
+# 也不需要区分 #else/#elif 切换到了哪个分支——只关心一个二元问题："当前
+# 这一行是不是处于某个条件编译区间内部"，据此在依赖声明上附加标注，而不是
+# 把条件编译分支里的 include 和顶层总会生效的 include 混为一谈平铺展示
+# （真实案例：Redis 的 src/ae.c，`#include "ae_evport.c"` 只在
+# `#ifdef HAVE_EVPORT` 分支内才会生效，取决于编译目标平台，不是这个文件
+# 的确定依赖）。
+_CPP_IFDEF_OPEN_RE = re.compile(r"^\s*#\s*(?:ifdef|ifndef|if)\b")
+_CPP_ENDIF_RE = re.compile(r"^\s*#\s*endif\b")
+
+# Java import：`import java.util.List;`、`import static java.lang.Math.PI;`、
+# `import java.util.*;`（通配符导入）
+JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][A-Za-z0-9_.]*(?:\.\*)?)\s*;")
+
+# C# using：`using System;`、`using System.Collections.Generic;`。
+# 不处理 `using MyAlias = System.Text.StringBuilder;` 这种别名 using（这种
+# using 语义上更接近"给一个已知类型起别名"而不是"引入一个新的依赖模块"，
+# 且这种写法在真实代码里远少于普通 using，不值得为此增加正则复杂度）。
+CS_USING_RE = re.compile(r"^\s*using\s+(?!.*=)([A-Za-z_][A-Za-z0-9_.]*)\s*;")
+
+# Java 标准库包名前缀（java.*、javax.* 是 JDK 官方命名空间，全球唯一，
+# 不会跟任何第三方或项目自己的包名冲突，可以直接用前缀判断，不需要像
+# Go 那样维护一份精确清单——Java 的包命名惯例本身就提供了这个信息）。
+_JAVA_STDLIB_PREFIXES = ("java.", "javax.")
+# C# 标准库/框架命名空间前缀（System.* 是 .NET 官方命名空间，同样全局唯一）。
+_CS_STDLIB_PREFIXES = ("System",)
+
+
+def _classify_java_import_target(target: str) -> str:
+    if target.startswith(_JAVA_STDLIB_PREFIXES):
+        return "external"
+    # Java 没有相对导入语法，包名本身也无法区分"这是项目自己的包"还是
+    # "第三方依赖的包"（两者写法完全一样，都是完整包路径），仅从这一行
+    # 代码本身无法可靠判断，归 unknown——跟 Go 的 import path 是同一类
+    # "目标清楚但归类信息不足"的情况。
+    return "unknown"
+
+
+def _classify_cs_import_target(target: str) -> str:
+    if target == "System" or target.startswith("System."):
+        return "external"
+    return "unknown"
+
 
 DIALECTS: dict[str, Dialect] = {
     "c_sharp": Dialect(
@@ -81,6 +142,7 @@ DIALECTS: dict[str, Dialect] = {
         extensions=(".cs",),
         modifiers_pattern=_CS_MODIFIERS,
         container_keywords=("class", "interface", "struct", "enum", "record"),
+        dependency_kind="using",
     ),
     "java": Dialect(
         key="java",
@@ -88,6 +150,7 @@ DIALECTS: dict[str, Dialect] = {
         modifiers_pattern=_JAVA_MODIFIERS,
         container_keywords=("class", "interface", "enum", "record"),
         generated_markers=_JAVA_GENERATED_MARKERS,
+        dependency_kind="import",
     ),
     "cpp": Dialect(
         key="cpp",
@@ -98,6 +161,7 @@ DIALECTS: dict[str, Dialect] = {
         # C++ 没有跨编译器/跨工具链统一的生成文件标记约定（不同代码生成器
         # 各自为政，没有类似 Go 官方规范那样的共识），暂不提供
         # generated_markers，也就是这个方言的 is_generated 恒为 False。
+        dependency_kind="include",
     ),
 }
 
@@ -392,6 +456,121 @@ class CFamilyAdapter:
             lines, self.dialect.generated_markers, check_lines=50
         )
 
+    def extract_dependencies(self, lines: list[str]) -> list[Dependency]:
+        """
+        按 dialect.dependency_kind 分派到对应语言的依赖识别规则。三种语言
+        的语法差异足够大（C/C++ 的 #include 是预处理器指令、带条件编译
+        问题；Java/C# 的 import/using 是普通语句），不适合共用同一段
+        正则/循环逻辑，各自独立实现但共享同一个入口方法和整体结构。
+        """
+        if self.dialect.dependency_kind == "include":
+            return self._extract_cpp_includes(lines)
+        if self.dialect.dependency_kind == "import":
+            return self._extract_java_imports(lines)
+        if self.dialect.dependency_kind == "using":
+            return self._extract_cs_usings(lines)
+        return []
+
+    def _extract_cpp_includes(self, lines: list[str]) -> list[Dependency]:
+        """
+        C/C++ 的 #include 识别，含条件编译标注。用一个简单的深度计数器
+        跟踪"当前是否处于 #ifdef/#ifndef/#if ... #endif 区间内部"——不需要
+        理解具体条件的真假（那需要真正的预处理器求值），也不需要区分
+        #else/#elif 切换到了哪个分支，只需要知道"这条 include 是不是被
+        任何条件编译包裹"这个二元事实，就足够在展示时诚实标注"这条依赖
+        取决于编译目标，不是总会生效"，而不是把它和顶层无条件的 include
+        混在一起平铺展示。
+
+        用真实项目 Redis 的 src/ae.c 复现验证过这个场景的必要性：
+        `#include "ae_evport.c"` 只在 `#ifdef HAVE_EVPORT` 分支内生效，
+        取决于编译时的操作系统/特性开关，不是这个文件放之四海皆准的依赖。
+
+        判断"这一行是不是真的 #include / #ifdef 指令"必须用屏蔽后的文本
+        （mask_c_family_comments_and_strings）——否则块注释里列 0 位置的
+        `#include <stdio.h>` 或 `#ifdef` 这类示例文字会被误判成真实依赖，
+        这是一个真实的缺陷（用构造的块注释案例复现确认过），跟 JS/TS、
+        Ruby、Python 的依赖识别用同一套"屏蔽后判断、原始文本取内容"的
+        双轨原则。屏蔽函数保证了屏蔽前后每一行的字符数和总行数完全一致，
+        所以按相同行号在原始文本上重新匹配取 target 是安全的。ifdef
+        深度计数同样必须基于屏蔽后的文本，否则注释里的 `#ifdef` 会错误
+        地 +1 深度，让后续真实 include 被误标"[条件编译分支内]"。
+        """
+        clean_lines = mask_c_family_comments_and_strings(lines)
+        deps: list[Dependency] = []
+        ifdef_depth = 0
+
+        for i, (clean, raw) in enumerate(zip(clean_lines, lines)):
+            clean_stripped = clean.rstrip("\n")
+            raw_stripped = raw.rstrip("\n")
+
+            if _CPP_IFDEF_OPEN_RE.match(clean_stripped):
+                ifdef_depth += 1
+                continue
+            if _CPP_ENDIF_RE.match(clean_stripped):
+                ifdef_depth = max(0, ifdef_depth - 1)
+                continue
+
+            m = CPP_INCLUDE_LOCAL_RE.match(clean_stripped)
+            if m:
+                raw_match = CPP_INCLUDE_LOCAL_RE.match(raw_stripped)
+                target = raw_match.group(1) if raw_match else m.group(1)
+                deps.append(Dependency(
+                    raw_text=self._annotate_conditional(raw_stripped.strip(), ifdef_depth),
+                    kind="internal",
+                    line_no=i + 1,
+                    target=target,
+                ))
+                continue
+
+            m = CPP_INCLUDE_SYSTEM_RE.match(clean_stripped)
+            if m:
+                raw_match = CPP_INCLUDE_SYSTEM_RE.match(raw_stripped)
+                target = raw_match.group(1) if raw_match else m.group(1)
+                deps.append(Dependency(
+                    raw_text=self._annotate_conditional(raw_stripped.strip(), ifdef_depth),
+                    kind="external",
+                    line_no=i + 1,
+                    target=target,
+                ))
+
+        return deps
+
+    @staticmethod
+    def _annotate_conditional(text: str, ifdef_depth: int) -> str:
+        if ifdef_depth > 0:
+            return f"{text}  [条件编译分支内，非必然生效]"
+        return text
+
+    def _extract_java_imports(self, lines: list[str]) -> list[Dependency]:
+        deps: list[Dependency] = []
+        for i, raw in enumerate(lines):
+            stripped = raw.rstrip("\n")
+            m = JAVA_IMPORT_RE.match(stripped)
+            if m:
+                target = m.group(1)
+                deps.append(Dependency(
+                    raw_text=stripped.strip(),
+                    kind=_classify_java_import_target(target),
+                    line_no=i + 1,
+                    target=target,
+                ))
+        return deps
+
+    def _extract_cs_usings(self, lines: list[str]) -> list[Dependency]:
+        deps: list[Dependency] = []
+        for i, raw in enumerate(lines):
+            stripped = raw.rstrip("\n")
+            m = CS_USING_RE.match(stripped)
+            if m:
+                target = m.group(1)
+                deps.append(Dependency(
+                    raw_text=stripped.strip(),
+                    kind=_classify_cs_import_target(target),
+                    line_no=i + 1,
+                    target=target,
+                ))
+        return deps
+
     def extract_symbols(self, filepath, lines: list[str]) -> AdapterResult:
         # 用单次线性扫描同时处理注释（//、/* */）和字符串/字符字面量
         # （"..."、C#的@"..."、'...'），而不是分两个独立阶段各自处理。
@@ -422,7 +601,8 @@ class CFamilyAdapter:
         frames: list[dict] = []
         tracker = BraceDepthTracker()
         qt_macro_seen = False
-        prev_stripped_line = ""  # 用于跨行判断"返回类型独占一行"的写法
+        prev_stripped_line = ""  # 用于跨行判断"返回类型独占一行"的写法（屏蔽后文本，用于匹配判断）
+        prev_display_line = ""  # 同上但是未屏蔽的原始文本，仅用于拼接展示文本
         # 记录当前是否正在等待一个匿名 typedef struct/enum 块的收尾行
         # （`typedef struct {` 这种没有 tag 名的情况，真正的名字要等
         # `} Name;` 才知道，见 TYPEDEF_BLOCK_OPEN_ANONYMOUS_RE 的说明）。
@@ -457,6 +637,18 @@ class CFamilyAdapter:
             # 逻辑里到处改名字的风险）。
             no_line_comment = raw.rstrip("\n")
             stripped = no_line_comment
+            # display_line 是这一行**未经字符串/注释屏蔽**的原始文本，只用于
+            # 最终展示给人看的符号名，不参与任何正则匹配或深度追踪判断——
+            # 那些必须继续用 stripped（屏蔽后的版本）。这是修复一个真实的、
+            # 独立评审报告点名的缺陷：早期版本展示符号名时也用屏蔽后的文本，
+            # 导致字符串内容被空格抹掉但引号本身保留，展示出
+            # `"DEFAULT_PREFIX"` 变成看不出内容的占位符这种"看起来完整、
+            # 实际内容已被静默清空"的结果，比"漏掉一些符号"更危险——使用者
+            # 会误以为自己看到的是完整信息。mask_c_family_comments_and_strings
+            # 保证了屏蔽前后每一行的字符数和总行数完全一致（专门为了保持列
+            # 对齐设计的），所以按相同行号索引 lines[i] 取原始文本用于展示
+            # 是安全的，不会有行号错位的风险。
+            display_line = lines[i].rstrip("\n") if i < len(lines) else stripped
 
             if not stripped.strip():
                 tracker.update(no_line_comment)
@@ -466,11 +658,13 @@ class CFamilyAdapter:
                 qt_macro_seen = True
                 tracker.update(no_line_comment)
                 prev_stripped_line = stripped
+                prev_display_line = display_line
                 continue
 
             if self._qt_visibility_re and self._qt_visibility_re.match(stripped):
                 tracker.update(no_line_comment)
                 prev_stripped_line = stripped
+                prev_display_line = display_line
                 continue
 
             depth_before = tracker.depth_before_line()
@@ -507,6 +701,7 @@ class CFamilyAdapter:
             if in_function_body:
                 tracker.update(no_line_comment)
                 prev_stripped_line = stripped
+                prev_display_line = display_line
                 continue
 
             # 只在栈顶是（或不存在）container 帧的情况下才谈得上"顶层"或"容器直接子层"，
@@ -516,6 +711,7 @@ class CFamilyAdapter:
             if top_is_pending_body:
                 tracker.update(no_line_comment)
                 prev_stripped_line = stripped
+                prev_display_line = display_line
                 continue
 
             container_frames = [f for f in frames if f["kind"] == "container"]
@@ -534,7 +730,7 @@ class CFamilyAdapter:
             if m and (is_top_level or in_container_direct_child):
                 cur_depth = nearest_container_depth + 1
                 container_name = m.groups()[-1]
-                symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                symbols.append(Symbol(name=display_line.strip(), depth=cur_depth, line_no=i + 1))
                 # 只有当这一行既不是"当场配平"（同行内 { } 都出现），也不是
                 # 纯前向声明（以 `;` 结尾、完全没有花括号，例如 C 头文件里
                 # 极常见的 `struct redisObject;` 前向声明）时，才需要压入一个
@@ -557,6 +753,7 @@ class CFamilyAdapter:
                     })
                 tracker.update(no_line_comment)
                 prev_stripped_line = stripped
+                prev_display_line = display_line
                 continue
 
             if self.dialect.key == "cpp" and is_top_level:
@@ -567,7 +764,7 @@ class CFamilyAdapter:
                     # 同时把这个块当作普通容器压帧，允许内部成员被正确嵌套展示。
                     cur_depth = nearest_container_depth + 1
                     container_name = tagged_open.group(2)
-                    symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                    symbols.append(Symbol(name=display_line.strip(), depth=cur_depth, line_no=i + 1))
                     frames.append({
                         "base_depth": depth_before,
                         "kind": "container",
@@ -577,6 +774,7 @@ class CFamilyAdapter:
                     })
                     tracker.update(no_line_comment)
                     prev_stripped_line = stripped
+                    prev_display_line = display_line
                     continue
 
                 anon_open = TYPEDEF_BLOCK_OPEN_ANONYMOUS_RE.match(stripped)
@@ -597,13 +795,15 @@ class CFamilyAdapter:
                     })
                     tracker.update(no_line_comment)
                     prev_stripped_line = stripped
+                    prev_display_line = display_line
                     continue
 
                 m = TYPEDEF_FUNC_PTR_RE.match(stripped) or TYPEDEF_RE.match(stripped)
                 if m:
-                    symbols.append(Symbol(name=stripped.strip(), depth=0, line_no=i + 1))
+                    symbols.append(Symbol(name=display_line.strip(), depth=0, line_no=i + 1))
                     tracker.update(no_line_comment)
                     prev_stripped_line = stripped
+                    prev_display_line = display_line
                     continue
 
             if in_container_direct_child or is_top_level:
@@ -627,7 +827,7 @@ class CFamilyAdapter:
                 # 内嵌的 jemalloc 依赖实测确认，单个文件里这种写法出现上千次，
                 # 是比 Class::method 更常见的一种真实缺口，仅在 C++ 方言下生效，
                 # 因为这是 C 代码的传统风格，C#/Java 代码几乎不会这样写）。
-                display_name = stripped.strip()
+                display_name = display_line.strip()
                 if m is None and self.dialect.key == "cpp" and _is_split_style_function_start(
                     prev_stripped_line, stripped
                 ):
@@ -639,7 +839,13 @@ class CFamilyAdapter:
                         m = fallback_match
                         # 展示时把上一行的返回类型也带上，跟真实 tree-sitter 基准的
                         # 多行签名展示方式一致，避免只显示函数名丢失类型信息。
-                        display_name = f"{prev_stripped_line.strip()}\n{stripped.strip()}"
+                        # 用 prev_display_line/display_line（未屏蔽的原始文本）
+                        # 拼接展示内容，不是 prev_stripped_line/stripped（这两个
+                        # 只用于上面的正则匹配判断）——原因见本函数开头
+                        # display_line 的说明：展示文本如果用屏蔽后的版本，
+                        # 字符串字面量的真实内容会被空格抹掉但引号保留，
+                        # 变成"看起来完整、实际内容已清空"的误导性输出。
+                        display_name = f"{prev_display_line.strip()}\n{display_line.strip()}"
 
                 # 通用规则和"返回类型独占一行"都没匹配上时，检查是不是
                 # "返回类型和函数名同一行，但参数列表跨行"这种写法（见
@@ -655,7 +861,7 @@ class CFamilyAdapter:
                             terminator = _find_statement_terminator(clean_lines, i)
                             if terminator in ("{", ";"):
                                 m = unclosed_match
-                                display_name = stripped.strip()
+                                display_name = display_line.strip()
 
                 if m:
                     cur_depth = nearest_container_depth + 1
@@ -687,6 +893,7 @@ class CFamilyAdapter:
 
             tracker.update(no_line_comment)
             prev_stripped_line = stripped
+            prev_display_line = display_line
 
         if qt_macro_seen:
             notes.append("检测到 Qt 宏 (Q_OBJECT/Q_PROPERTY等)，已跳过宏本身，未展开元对象系统")

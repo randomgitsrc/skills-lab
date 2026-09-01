@@ -56,7 +56,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from adapter_base import AdapterResult, Symbol, register
+from adapter_base import AdapterResult, Dependency, Symbol, register
 from adapter_utils import BraceDepthTracker, line_is_brace_balanced
 
 # Rust 需要一个专属的、单次线性扫描的注释+字符串屏蔽函数，不能像其他花括号
@@ -231,12 +231,99 @@ MOD_RE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_
 IMPL_RE = re.compile(r"^(\s*)impl\b[^{;]*\{?\s*$")
 ATTRIBUTE_RE = re.compile(r"^\s*#!?\[.*\]\s*$")
 
+# --- 依赖识别 ---
+#
+# `use` 语句：`use std::collections::HashMap;`、`use crate::utils::helper;`。
+# 只需要拿到 use 和分号/花括号之间的路径部分，不需要解析 `use foo::{a, b}`
+# 这种花括号批量导入里具体导入了哪些符号（跟 Python 的 from...import 是
+# 同一个道理：只关心"这个文件依赖哪个模块"，不关心从那个模块具体拿了
+# 什么）。
+USE_RE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?use\s+([A-Za-z_][A-Za-z0-9_:]*)")
+
+# `mod foo;`（声明一个子模块，对应磁盘上的 foo.rs 或 foo/mod.rs，这是
+# Rust 里唯一真正回答"这个文件依赖哪个别的文件"的语句——`use` 更多是
+# "引用一个已知路径下的东西"，很多时候引用的是同一个 crate 内部或者
+# 外部 crate，不直接等价于"这里有一个新文件"。已有的 MOD_RE 用来识别
+# `mod foo { ... }` 这种内联子模块定义（生成符号），这里单独识别
+# `mod foo;` 这种"声明外部文件模块"的形式（生成依赖），两者语法很像但
+# 语义不同：前者子模块内容直接写在同一个文件里，不对应额外的文件；
+# 后者必须存在一个对应的 foo.rs 才能编译通过。
+MOD_DECL_RE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+
+# Rust 标准库/官方 crate 前缀（std/core/alloc 是编译器内置，不需要在
+# Cargo.toml 里声明；test/proc_macro 是编译器提供的特殊 crate）。跟 Node.js
+# 内置模块判断同样的思路：Rust 顶级 crate 命名空间里，这几个是官方保留、
+# 全局唯一、不会跟真实项目的 crate 名冲突的前缀，可以直接列举判断。
+_RUST_STDLIB_CRATES = frozenset({"std", "core", "alloc", "test", "proc_macro"})
+
+
+def _classify_rust_use_target(path: str) -> str:
+    first_segment = path.split("::")[0]
+    if first_segment in ("crate", "self", "super"):
+        # `crate::`（当前 crate 根开始）、`self::`（当前模块）、
+        # `super::`（父模块）都是明确的、不需要额外信息就能确定的
+        # "同一个 crate 内部"引用。
+        return "internal"
+    if first_segment in _RUST_STDLIB_CRATES:
+        return "external"
+    # 剩下的裸 crate 名（比如 `serde`）——语法上跟"当前 crate 里一个顶层
+    # 模块名"完全没有区别（Rust 2018+ 的模块路径解析规则允许两种情况
+    # 用同样的写法），仅从这一行代码本身无法确定这是 Cargo.toml 里声明的
+    # 外部依赖，还是当前 crate 自己某个未加 crate:: 前缀直接引用的顶层
+    # 模块，归 unknown，不猜测。
+    return "unknown"
+
 
 class RustAdapter:
     name = "rust"
 
     def match(self, filepath) -> bool:
         return Path(filepath).suffix == ".rs"
+
+    def extract_dependencies(self, lines: list[str]) -> list[Dependency]:
+        """
+        识别 Rust 的 `use` 语句（引用路径，可能内部可能外部，见
+        _classify_rust_use_target 的说明）和 `mod foo;`（声明外部文件
+        模块，明确是 internal——这才是 Rust 里真正对应"这个文件依赖
+        哪个别的文件"的语句）。
+
+        复用 mask_rust_source 屏蔽注释/字符串/生命周期标注，避免文档
+        注释里举例提到的 `use foo::bar;` 这类文字被误判为真实依赖
+        （原则跟 JS/TS、C-family 的实现一致：用屏蔽后的文本判断"这一行
+        是否真的是代码"，但这里 use/mod 语句本身不含字符串字面量，
+        不需要像 JS/TS 那样额外回到原始文本提取内容——Rust 的模块路径
+        写法本身就不带引号，屏蔽机制不会影响到它）。
+        """
+        clean_lines = mask_rust_source(lines)
+        deps: list[Dependency] = []
+
+        for i, raw in enumerate(clean_lines):
+            stripped = raw.rstrip("\n")
+            if not stripped.strip():
+                continue
+
+            m = MOD_DECL_RE.match(stripped)
+            if m:
+                target = m.group(2)
+                deps.append(Dependency(
+                    raw_text=stripped.strip(),
+                    kind="internal",
+                    line_no=i + 1,
+                    target=target,
+                ))
+                continue
+
+            m = USE_RE.match(stripped)
+            if m:
+                target = m.group(2)
+                deps.append(Dependency(
+                    raw_text=stripped.strip(),
+                    kind=_classify_rust_use_target(target),
+                    line_no=i + 1,
+                    target=target,
+                ))
+
+        return deps
 
     def extract_symbols(self, filepath, lines: list[str]) -> AdapterResult:
         # 用 Rust 专属的统一注释/字符串屏蔽函数（见 mask_rust_source 的文档

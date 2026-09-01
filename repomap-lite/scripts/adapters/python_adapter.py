@@ -21,13 +21,50 @@ Python protocol compiler plugin. DO NOT EDIT!`）。用真实
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
-from adapter_base import AdapterResult, Symbol, register
-from adapter_utils import indent_of, matches_generated_file_markers, skip_python_style_triple_quoted_strings
+from adapter_base import AdapterResult, Dependency, Symbol, register
+from adapter_utils import extract_quoted_literal, indent_of, matches_generated_file_markers, skip_python_style_triple_quoted_strings
 
 PY_DEF_RE = re.compile(r"^(\s*)(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
 PY_DECORATOR_RE = re.compile(r"^(\s*)@[A-Za-z_][A-Za-z0-9_.]*")
+
+# `import foo` / `import foo.bar` / `import foo as f`（含逗号分隔多个：
+# `import foo, bar`，这种情况这里只取第一个模块名做 target 展示，完整原始
+# 文本仍然保留在 raw_text 里，不丢失信息）。
+PY_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)")
+# `from foo import bar` / `from foo import (bar, baz)` / `from . import x` /
+# `from ..pkg import y`——只需要拿到 from 和 import 之间的模块名部分，
+# 不需要解析 import 了哪些具体符号（那些符号跟"这个文件依赖哪个模块"这个
+# 问题无关，且可能跨行出现在括号里，解析成本和收益不成比例）。
+PY_FROM_IMPORT_RE = re.compile(r"^\s*from\s+(\.*[A-Za-z_][A-Za-z0-9_.]*|\.+)\s+import\b")
+# 动态导入：importlib.import_module(...)、__import__(...)。只检测到这里
+# "存在一次动态导入"，具体目标能不能解析出来，由 extract_quoted_literal
+# 在调用处判断（括号里是字符串字面量则可解析，是变量/表达式则归 dynamic）。
+PY_DYNAMIC_IMPORT_RE = re.compile(r"^\s*(?:\w+\s*=\s*)?(?:importlib\.import_module|__import__)\s*\(\s*([^)]*)\)")
+
+# Python 标准库模块名集合，直接用 sys.stdlib_module_names（Python 3.10+
+# 内置，官方维护，随解释器版本自动同步，不需要像 Go 那样手动固化一份
+# 可能过时的静态清单——这是 Python 标准库比 Go 标准库更容易做到"精确判断
+# 是不是标准库"的地方，因为语言自己提供了这个信息源）。用 getattr 做
+# 版本兼容：3.10 以下没有这个属性，降级为空集合，效果是"无法确认标准库
+# 身份的模块全部归为 unknown"，不会因为这个属性不存在就报错崩溃。
+_PY_STDLIB_MODULES = frozenset(getattr(sys, "stdlib_module_names", ()))
+
+
+def _classify_py_import_target(target: str) -> str:
+    if target.startswith("."):
+        # 相对导入（`from . import x`、`from ..pkg import y`）明确是项目
+        # 内部——Python 的相对导入语法本身就是"这是同一个包内部"的声明，
+        # 不需要额外信息就能确定，这跟 Go 完全不同（Go 没有相对导入语法）。
+        return "internal"
+    top_level = target.split(".")[0]
+    if top_level in _PY_STDLIB_MODULES:
+        return "external"
+    return "unknown"
+
+
 
 # protobuf/gRPC 生成的 Python 文件用的两种官方标记文案（分别对应 protoc 的
 # Python 插件和 gRPC 的 Python 插件，两者文案不完全一样，都要覆盖）。
@@ -45,6 +82,75 @@ class PythonAdapter:
 
     def is_generated(self, lines: list[str]) -> bool:
         return matches_generated_file_markers(lines, _GENERATED_MARKERS)
+
+    def extract_dependencies(self, lines: list[str]) -> list[Dependency]:
+        """
+        识别 Python 的四种依赖声明形式：`import x`、`from x import y`
+        （含相对导入）、以及两种动态导入（importlib.import_module/
+        __import__）。复用 skip_python_style_triple_quoted_strings 跳过
+        三引号字符串内容——不这样做的话，文档字符串里用来举例的
+        `'''Example: import foo'''` 这类内容会被误判为真实依赖声明。
+
+        相对导入（`from . import x`）明确归 internal；能确认是标准库的
+        归 external；其余（第三方包、或者是本项目自己的顶层包但因为不是
+        相对导入写法所以从这一行本身看不出来）归 unknown——Python 的
+        绝对导入语法本身不区分"这是我自己项目的包"还是"这是装的第三方
+        包"，两者写法完全一样，仅从单行代码无法可靠区分，跟 Go 的
+        `import "goreal/internal/config"` 是同一类"目标清楚但归类不确定"
+        的情况。
+        """
+        deps: list[Dependency] = []
+        in_triple = skip_python_style_triple_quoted_strings(lines)
+
+        for i, raw in enumerate(lines):
+            if in_triple[i]:
+                continue
+            stripped = raw.rstrip("\n")
+            if not stripped.strip():
+                continue
+
+            m = PY_DYNAMIC_IMPORT_RE.match(stripped)
+            if m:
+                arg = m.group(1).strip()
+                literal = extract_quoted_literal(arg)
+                if literal is not None:
+                    deps.append(Dependency(
+                        raw_text=stripped.strip(),
+                        kind=_classify_py_import_target(literal),
+                        line_no=i + 1,
+                        target=literal,
+                    ))
+                else:
+                    deps.append(Dependency(
+                        raw_text=stripped.strip(),
+                        kind="dynamic",
+                        line_no=i + 1,
+                        target=None,
+                    ))
+                continue
+
+            m = PY_FROM_IMPORT_RE.match(stripped)
+            if m:
+                target = m.group(1)
+                deps.append(Dependency(
+                    raw_text=stripped.strip(),
+                    kind=_classify_py_import_target(target),
+                    line_no=i + 1,
+                    target=target,
+                ))
+                continue
+
+            m = PY_IMPORT_RE.match(stripped)
+            if m:
+                target = m.group(1)
+                deps.append(Dependency(
+                    raw_text=stripped.strip(),
+                    kind=_classify_py_import_target(target),
+                    line_no=i + 1,
+                    target=target,
+                ))
+
+        return deps
 
     def extract_symbols(self, filepath, lines: list[str]) -> AdapterResult:
         symbols: list[Symbol] = []

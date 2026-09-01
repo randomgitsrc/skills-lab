@@ -44,7 +44,44 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from adapter_base import AdapterResult, Symbol, register
+from adapter_base import AdapterResult, Dependency, Symbol, register
+
+# --- 依赖识别 ---
+#
+# `require 'foo'`（可能是标准库/gem，也可能是项目自己的文件，无法从
+# 单行本身区分——Ruby 的 require 路径解析规则跟 npm/Go 不同，没有
+# "带 ./ 前缀才是本地"这种强制约定，纯 gem 名和本地文件路径可以长得
+# 一模一样）；`require_relative 'foo'`（明确相对当前文件路径，只能是
+# 项目内部文件，这是 Ruby 专门为了解决"require 分不清本地/gem"这个
+# 问题而引入的语法）。两者语义不同，必须分开处理，不能都当成笼统的
+# "require"：require_relative 是唯一能不靠额外信息就确定 internal 的
+# 情况，普通 require 的目标即使是字符串字面量、拿到的内容也无法确定
+# 内外部归类。
+REQUIRE_RE = re.compile(r"""^\s*require\s+(['"])([^'"]*)\1""")
+REQUIRE_RELATIVE_RE = re.compile(r"""^\s*require_relative\s+(['"])([^'"]*)\1""")
+
+# Ruby 标准库常见模块（手动列举一份高频使用的核心库，不追求穷尽——
+# Ruby 没有像 Python sys.stdlib_module_names 那样的运行时内置清单可以
+# 直接查询，只能手动维护；这份清单如果遗漏了某个冷门标准库，效果是
+# 保守地把它归为 unknown 而不是 external，不会导致误判，可以接受）。
+_RUBY_STDLIB_MODULES = frozenset({
+    "json", "set", "uri", "net/http", "net/https", "net/ftp", "net/smtp",
+    "date", "time", "fileutils", "pathname", "logger", "digest", "base64",
+    "yaml", "csv", "erb", "ostruct", "singleton", "forwardable", "delegate",
+    "open-uri", "optparse", "securerandom", "tempfile", "tmpdir", "socket",
+    "thread", "monitor", "benchmark", "pp", "pry", "irb", "abbrev",
+    "shellwords", "English", "resolv",
+})
+
+
+def _classify_ruby_require_target(target: str) -> str:
+    if target in _RUBY_STDLIB_MODULES:
+        return "external"
+    # 普通 require 的目标既可能是 gem 名，也可能是项目自己的文件路径
+    # （Ruby 的 require 惯例是把 lib/ 目录加进 $LOAD_PATH，之后项目内部
+    # 文件也用不带路径前缀的裸名字 require，跟外部 gem 写法完全一样），
+    # 仅从这一行代码本身无法确定，归 unknown。
+    return "unknown"
 
 # 开启一个需要 end 收尾的块的关键字（作为独立单词出现在行首时）。
 # do 单独处理（作为块修饰符出现在其他语句末尾，见 _opens_do_block）。
@@ -197,6 +234,53 @@ class RubyAdapter:
 
     def match(self, filepath) -> bool:
         return Path(filepath).suffix == ".rb"
+
+    def extract_dependencies(self, lines: list[str]) -> list[Dependency]:
+        """
+        识别 `require`（无法从单行确定内外部，归 unknown）和
+        `require_relative`（明确相对当前文件路径，归 internal）。复用
+        _mask_ruby_strings_and_comments 屏蔽 `#` 注释和 `=begin/=end`
+        块注释，避免注释里提到的 require 示例文字被误判为真实依赖。
+        字符串遮蔽后的内容不影响这里的判断——require 的参数需要
+        是一个真正的字符串字面量才能匹配正则本身，遮蔽只影响引号
+        内部字符不影响引号和关键字，判断结构不需要额外回到原始文本
+        （跟 Rust 同理：这里提取的是路径字符串，不涉及展示层的
+        遮蔽/未遮蔽区别，因为这个正则直接在原始 lines 上跑，不经过
+        遮蔽这一步——遮蔽只用于排除掉注释里的诱饵）。
+        """
+        clean_lines = _mask_ruby_strings_and_comments(lines)
+        deps: list[Dependency] = []
+
+        for i, (clean, raw) in enumerate(zip(clean_lines, lines)):
+            clean_stripped = clean.rstrip("\n")
+            if not clean_stripped.strip():
+                continue
+            raw_stripped = raw.rstrip("\n")
+
+            if REQUIRE_RELATIVE_RE.match(clean_stripped):
+                m = REQUIRE_RELATIVE_RE.match(raw_stripped)
+                if m:
+                    target = m.group(2)
+                    deps.append(Dependency(
+                        raw_text=raw_stripped.strip(),
+                        kind="internal",
+                        line_no=i + 1,
+                        target=target,
+                    ))
+                continue
+
+            if REQUIRE_RE.match(clean_stripped):
+                m = REQUIRE_RE.match(raw_stripped)
+                if m:
+                    target = m.group(2)
+                    deps.append(Dependency(
+                        raw_text=raw_stripped.strip(),
+                        kind=_classify_ruby_require_target(target),
+                        line_no=i + 1,
+                        target=target,
+                    ))
+
+        return deps
 
     def extract_symbols(self, filepath, lines: list[str]) -> AdapterResult:
         clean_lines = _mask_ruby_strings_and_comments(lines)

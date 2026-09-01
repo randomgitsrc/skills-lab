@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from adapter_base import AdapterResult, Symbol, register
+from adapter_base import AdapterResult, Dependency, Symbol, register
 from adapter_utils import (
     BraceDepthTracker,
     indent_of,
@@ -85,6 +85,62 @@ FUNCTION_BODY_OPENER_RE = re.compile(
     r"\b[A-Za-z_$][A-Za-z0-9_$]*\s*=>\s*\{)"
 )
 
+# --- 依赖识别 ---
+#
+# ESM 的 import/export...from 是真正的语句级语法，只能出现在行首（不能
+# 嵌在表达式内部），用行首锚定匹配足够可靠：
+#   import x from '...'  /  import { a, b } from '...'  /  import * as x from '...'
+#   export { x } from '...'  /  export * from '...'（re-export，同样是依赖）
+JS_IMPORT_FROM_RE = re.compile(r"""^\s*import\s+.*?\s+from\s+(['"])([^'"]*)\1""")
+JS_EXPORT_FROM_RE = re.compile(r"""^\s*export\s+.*?\s+from\s+(['"])([^'"]*)\1""")
+JS_SIDE_EFFECT_IMPORT_RE = re.compile(r"""^\s*import\s+(['"])([^'"]*)\1\s*;?\s*$""")
+
+# require(...) 和动态 import(...) 不是语句级语法，是普通的函数调用/表达式，
+# 可以出现在任意位置（真实案例：lodash 的
+# `freeModule && freeModule.require && freeModule.require('util').types`，
+# require 调用嵌在一长串条件判断表达式里，前面还有别的内容），不能像上面
+# ESM 语法那样要求行首锚定，必须用 re.search 在整行范围内查找。
+JS_REQUIRE_RE = re.compile(r"""\brequire\s*\(\s*(['"]?)([^'")]*)\1\s*\)""")
+JS_DYNAMIC_IMPORT_RE = re.compile(r"""\bimport\s*\(\s*(['"]?)([^'")]*)\1\s*\)""")
+
+# Node.js 内置模块（跟 Go/Python 同样的思路：用一份精确清单区分"标准库"，
+# 不用启发式猜测——Node 的内置模块名足够少，直接手动列举是可行的，不像
+# Go 标准库有189个包需要从工具链提取）。这份清单基于 Node.js 官方文档
+# 长期稳定的内置模块列表（未加 node: 前缀的传统写法和 node: 前缀写法都
+# 可能出现，两种都要能匹配到同一个模块名）。
+_JS_BUILTIN_MODULES = frozenset({
+    "assert", "async_hooks", "buffer", "child_process", "cluster", "console",
+    "constants", "crypto", "dgram", "diagnostics_channel", "dns", "domain",
+    "events", "fs", "http", "http2", "https", "inspector", "module", "net",
+    "os", "path", "perf_hooks", "process", "punycode", "querystring",
+    "readline", "repl", "stream", "string_decoder", "sys", "timers", "tls",
+    "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads",
+    "zlib",
+})
+
+
+def _classify_js_import_target(target: str) -> str:
+    if target.startswith("."):
+        # 相对路径（'./foo'、'../utils'）明确是项目内部——这是 JS/TS
+        # 生态里唯一"语法本身就能确定内部/外部"的情况，不需要额外信息。
+        return "internal"
+    bare = target[5:] if target.startswith("node:") else target
+    if bare in _JS_BUILTIN_MODULES:
+        return "external"
+    if target.startswith("@") or "/" not in target:
+        # 裸包名（'react'）或 npm 的 scoped 包名（'@babel/core'）——这是
+        # npm 生态的命名惯例：没有相对路径前缀的模块说明符，几乎总是
+        # node_modules 里的第三方包，不太可能是本项目自己的源码（项目
+        # 自己的模块要被这样引用，需要先在 package.json 里把自己注册成
+        # 一个可导入的包名，这在真实项目里非常少见）。这跟 Go/Python
+        # 那种"裸路径无法确定"的情况不同——npm 的路径解析规则本身就是
+        # "没有 ./ 前缀就去 node_modules 找"，语法本身已经隐含了"这是
+        # 外部包"的强烈信号，不是纯粹瞎猜。
+        return "external"
+    # 剩下的情况：不是相对路径，也不是裸包名/scoped包名，但含有多级斜杠
+    # 且不以 @ 开头——这种形态少见，不确定归类，保守起见归 unknown。
+    return "unknown"
+
 
 def _first_name_group(m: re.Match, groups: tuple[int, ...]) -> str | None:
     for g in groups:
@@ -99,6 +155,114 @@ class JsTsAdapter:
 
     def match(self, filepath) -> bool:
         return Path(filepath).suffix in JS_TS_EXTENSIONS
+
+    def extract_dependencies(self, lines: list[str]) -> list[Dependency]:
+        """
+        识别 JS/TS 的依赖声明：ESM 的 import/export...from（语句级语法，
+        行首锚定匹配）、CommonJS 的 require(...)、动态 import(...)（都不是
+        语句级语法，可以出现在任意表达式位置，用 re.search 而不是行首
+        匹配——真实案例：lodash 里 `freeModule && freeModule.require &&
+        freeModule.require('util').types`，require 调用嵌在一长串条件
+        判断表达式里）。
+
+        用共享的 mask_c_family_comments_and_strings 屏蔽后的文本判断
+        "这一行是否真的包含依赖声明关键字"（如果屏蔽后这一行的
+        import/require 关键字消失了或者整行变成空白，说明原文里那处
+        文字出现在注释或字符串内部，不是真实代码——真实案例：
+        `// This used to import from '../old-utils'` 这条注释被
+        mask_c_family_comments_and_strings 处理后整行变空白，
+        `import`/`require` 关键字随之消失，据此判断不是真实依赖）；
+        但真正提取路径内容时，回到**未屏蔽的原始 lines**——这是跟上一轮
+        修复符号展示 bug 完全相同的原则的另一次应用：结构判断该用屏蔽后
+        的文本，取真实内容绝不能用屏蔽后的文本（屏蔽会把字符串内容替换
+        成空格，如果拿这份文本去解析依赖目标，会解析出一堆空白，等于
+        白做）。
+        """
+        clean_lines = mask_c_family_comments_and_strings(lines)
+        deps: list[Dependency] = []
+
+        for i, (clean, raw) in enumerate(zip(clean_lines, lines)):
+            clean_stripped = clean.rstrip("\n")
+            if not clean_stripped.strip():
+                continue
+            raw_stripped = raw.rstrip("\n")
+
+            # ESM import...from / export...from：先在屏蔽后的文本上确认
+            # 这一行确实是真实的 import/export 语句（不是注释里提到的
+            # 文字），再回到原始文本上提取真正的路径字符串。
+            if JS_IMPORT_FROM_RE.match(clean_stripped):
+                m = JS_IMPORT_FROM_RE.match(raw_stripped)
+                if m:
+                    target = m.group(2)
+                    deps.append(Dependency(
+                        raw_text=raw_stripped.strip(),
+                        kind=_classify_js_import_target(target),
+                        line_no=i + 1,
+                        target=target,
+                    ))
+                    continue
+
+            if JS_EXPORT_FROM_RE.match(clean_stripped):
+                m = JS_EXPORT_FROM_RE.match(raw_stripped)
+                if m:
+                    target = m.group(2)
+                    deps.append(Dependency(
+                        raw_text=raw_stripped.strip(),
+                        kind=_classify_js_import_target(target),
+                        line_no=i + 1,
+                        target=target,
+                    ))
+                    continue
+
+            if JS_SIDE_EFFECT_IMPORT_RE.match(clean_stripped):
+                # 纯副作用导入：`import './setup';`，没有绑定任何名字
+                m = JS_SIDE_EFFECT_IMPORT_RE.match(raw_stripped)
+                if m:
+                    target = m.group(2)
+                    deps.append(Dependency(
+                        raw_text=raw_stripped.strip(),
+                        kind=_classify_js_import_target(target),
+                        line_no=i + 1,
+                        target=target,
+                    ))
+                    continue
+
+            # require(...) 和动态 import(...) 不要求行首，用 search 在
+            # 屏蔽后文本里先确认关键字确实存在于真实代码里，再到原始文本
+            # 相同位置提取内容。这里对屏蔽后文本和原始文本分别单独跑
+            # search，而不是"屏蔽后文本 search 到位置、原始文本按位置切片"
+            # ——因为屏蔽只替换字符不改变长度和位置，两次独立 search 理论上
+            # 会落在同一个位置，但独立 search 更简单直接，不需要额外验证
+            # 位置对齐这个前提。
+            for pattern, extra_deps in (
+                (JS_REQUIRE_RE, deps),
+                (JS_DYNAMIC_IMPORT_RE, deps),
+            ):
+                if not pattern.search(clean_stripped):
+                    continue
+                for m in pattern.finditer(raw_stripped):
+                    quote = m.group(1)
+                    content = m.group(2)
+                    if quote in ("'", '"'):
+                        target = content
+                        extra_deps.append(Dependency(
+                            raw_text=raw_stripped.strip(),
+                            kind=_classify_js_import_target(target),
+                            line_no=i + 1,
+                            target=target,
+                        ))
+                    else:
+                        # 括号里不是带引号的字符串字面量，说明是变量/表达式
+                        # （比如 `require(moduleName)`、`import(getPath())`），
+                        # 目标无法静态解析，归 dynamic。
+                        extra_deps.append(Dependency(
+                            raw_text=raw_stripped.strip(),
+                            kind="dynamic",
+                            line_no=i + 1,
+                            target=None,
+                        ))
+
+        return deps
 
     def extract_symbols(self, filepath, lines: list[str]) -> AdapterResult:
         # 用统一的注释+字符串屏蔽（含模板字符串），避免早期版本单独用
@@ -144,6 +308,23 @@ class JsTsAdapter:
 
         for i, raw in enumerate(clean_lines):
             stripped = raw.rstrip("\n")
+            # display_stripped 是这一行**未经字符串/注释屏蔽**的原始文本，
+            # 只用于最终展示给人看的符号名（Symbol.name），不参与任何正则
+            # 匹配或深度追踪判断——那些必须继续用 stripped（屏蔽后的版本），
+            # 原因见上面 mask_c_family_comments_and_strings 的说明（字符串
+            # 内容里的 `{`/`*/*` 等字符会干扰花括号计数和注释边界判断）。
+            #
+            # 这是修复一个真实的、独立评审报告点名的缺陷：早期版本展示符号
+            # 名时也用的是屏蔽后的 stripped，导致字符串内容被空格抹掉但
+            # 引号本身保留，展示出 `path.resolve('  ')` 这种"看起来完整、
+            # 实际内容已被静默清空"的结果——用真实的 .mjs 文件复现确认过
+            # （`path.resolve(HERE, '..')` 展示成看不出原始路径的占位符），
+            # 这比"漏掉一些符号"更危险，因为使用者会误以为自己看到的是
+            # 完整信息。mask_c_family_comments_and_strings 保证了屏蔽前后
+            # 每一行的字符数和总行数完全一致（专门为了保持列对齐设计的），
+            # 所以按相同的行号索引 lines[i] 取原始文本用于展示是安全的
+            # ——不会有行号错位的风险。
+            display_stripped = lines[i].rstrip("\n") if i < len(lines) else stripped
             if not stripped.strip():
                 tracker.update(stripped)
                 continue
@@ -169,7 +350,7 @@ class JsTsAdapter:
                 name_groups = m.groups()
                 name = name_groups[-1]
                 cur_depth = container_stack[-1]["depth"] + 1 if container_stack else 0
-                symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                symbols.append(Symbol(name=display_stripped.strip(), depth=cur_depth, line_no=i + 1))
                 # 这个 class/interface 自己成为一个新容器，供内部成员使用。
                 # member_count 用于限制 interface 字段列表的展示数量（见下方
                 # INTERFACE_MEMBER_RE 分支），对齐真实 tree-sitter 基准的
@@ -190,7 +371,7 @@ class JsTsAdapter:
                 m = FUNC_RE.match(stripped)
                 if m and m.group(5) and (is_top_level or in_container_direct_child):
                     cur_depth = container_stack[-1]["depth"] + 1 if container_stack else 0
-                    symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                    symbols.append(Symbol(name=display_stripped.strip(), depth=cur_depth, line_no=i + 1))
                     handled = True
 
             if not handled and is_top_level and not in_function_body_somewhere:
@@ -200,19 +381,19 @@ class JsTsAdapter:
                 # 局部变量误判为模块级声明——见本函数开头 func_body_stack 的说明）
                 m = ARROW_ASSIGN_RE.match(stripped)
                 if m:
-                    symbols.append(Symbol(name=stripped.strip(), depth=0, line_no=i + 1))
+                    symbols.append(Symbol(name=display_stripped.strip(), depth=0, line_no=i + 1))
                     handled = True
 
                 if not handled:
                     m = TYPE_ALIAS_RE.match(stripped) or ENUM_RE.match(stripped)
                     if m:
-                        symbols.append(Symbol(name=stripped.strip(), depth=0, line_no=i + 1))
+                        symbols.append(Symbol(name=display_stripped.strip(), depth=0, line_no=i + 1))
                         handled = True
 
                 if not handled:
                     m = PLAIN_DECL_RE.match(stripped)
                     if m:
-                        symbols.append(Symbol(name=stripped.strip(), depth=0, line_no=i + 1))
+                        symbols.append(Symbol(name=display_stripped.strip(), depth=0, line_no=i + 1))
                         handled = True
 
             if not handled and in_container_direct_child:
@@ -220,7 +401,7 @@ class JsTsAdapter:
                 m = CLASS_METHOD_RE.match(stripped)
                 if m and not stripped.strip().startswith(("//", "*", "/*")):
                     cur_depth = container_stack[-1]["depth"] + 1
-                    symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                    symbols.append(Symbol(name=display_stripped.strip(), depth=cur_depth, line_no=i + 1))
                     handled = True
 
             if not handled and in_container_direct_child:
@@ -236,11 +417,11 @@ class JsTsAdapter:
                     if frame["is_interface"]:
                         if frame["member_count"] < 3:
                             cur_depth = frame["depth"] + 1
-                            symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                            symbols.append(Symbol(name=display_stripped.strip(), depth=cur_depth, line_no=i + 1))
                             frame["member_count"] += 1
                     else:
                         cur_depth = frame["depth"] + 1
-                        symbols.append(Symbol(name=stripped.strip(), depth=cur_depth, line_no=i + 1))
+                        symbols.append(Symbol(name=display_stripped.strip(), depth=cur_depth, line_no=i + 1))
 
             # 无论上面有没有识别出符号，都要单独检查这一行是否"开启了一个函数体"，
             # 用来维护 func_body_stack（IIFE、真实的顶层/嵌套函数、匿名回调、

@@ -89,6 +89,83 @@ class MyAdapter:
 文件确认这个语言确实存在"生成文件跟手写代码混在同一目录、需要靠内容
 标记区分"这种模式，而不是假设所有语言都有。
 
+### `extract_dependencies()` 是可选的，实现前先做逐语言分析，不要想当然
+
+如果这门语言有规整的依赖声明语法（`import`/`require`/`#include`/`use`
+这类），可以覆盖这个方法，让 REPOMAP 展示"这个文件依赖谁"。不实现完全
+没问题，跟 `is_generated` 一样是安全的默认降级。
+
+**实现前一定要先分析这门语言的依赖语法有哪些形式、哪些能可靠识别、
+哪些不能**，不要拿到手就直接写正则——已经支持的6种语言（Go/Python/
+JS-TS/C-family/Rust/Ruby）在实现过程中每一种都发现了至少一个"想当然
+会出错"的地方，具体记录见 `references/known_limitations.md`"文件间
+依赖识别"一节，最值得引以为戒的两条：
+
+1. **不要用"看起来像"的正则猜测标准库/内部包**，用精确匹配一份真实
+   清单（能从语言自带的运行时数据源拿到最好，比如 Python 的
+   `sys.stdlib_module_names`；拿不到就手动固化一份，比如 Go 从真实
+   工具链提取的189个标准库路径）。真实案例：Go 最初用"不含域名点号
+   的裸路径=标准库"这条正则，被一个假设的项目 module 名
+   `goreal`（不含点号的短小写单词，语法上跟真标准库包名完全无法区分）
+   直接证伪。
+2. **依赖声明语法不一定要求出现在行首**。ESM 的 `import`/`export...from`
+   是语句级语法可以行首锚定，但 CommonJS 的 `require(...)` 是普通函数
+   调用，可以嵌在任意表达式里——真实案例是 lodash 的
+   `mod.require('util')` 藏在一长串条件判断里。新语言如果有类似的
+   "既可能是语句关键字、也可能是函数调用"的依赖声明形式，先用真实
+   项目源码搜一遍这种写法存在不存在，再决定用 `.match()`（行首锚定）
+   还是 `.search()`（任意位置）。
+
+```python
+import re
+
+from adapter_base import Dependency
+from adapter_utils import extract_quoted_literal
+
+# 标准库清单必须来自真实、可核对的来源（语言自带数据、工具链目录、
+# 官方文档），下面这行只是占位示意——换成这门语言真实的标准库名单。
+_MY_LANG_STDLIB = frozenset({"core_lib_a", "core_lib_b"})
+
+MY_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)")
+
+def _classify_my_lang_target(target: str) -> str:
+    if target.startswith("."):
+        return "internal"          # 语法本身能确定
+    if target in _MY_LANG_STDLIB:  # 精确匹配一份真实清单，不要用正则猜
+        return "external"
+    return "unknown"                # 证据不足，不要瞎猜
+
+class MyAdapter:
+    # ... 其余适配器方法 ...
+
+    def extract_dependencies(self, lines: list[str]) -> list[Dependency]:
+        deps = []
+        for i, raw in enumerate(lines):
+            m = MY_IMPORT_RE.match(raw.rstrip("\n"))
+            if m:
+                target = m.group(1)
+                deps.append(Dependency(
+                    raw_text=raw.strip(), kind=_classify_my_lang_target(target),
+                    line_no=i + 1, target=target,
+                ))
+        return deps
+```
+
+`Dependency.kind` 是四选一（`internal`/`external`/`unknown`/`dynamic`），
+完整语义说明见 `adapter_base.py` 里 `DependencyKind` 的文档字符串——
+简单说：目标字符串知道、内外部归类不确定时用 `unknown`（不要武断分类
+成 internal 或 external），目标本身是变量/表达式无法静态解析时用
+`dynamic`（`target` 设为 `None`，不要瞎猜一个可能错的字符串）。判断
+"括号里是不是一个字符串字面量"可以直接用共享工具
+`adapter_utils.extract_quoted_literal()`，不需要每个适配器各写一遍。
+
+如果这门语言的注释/字符串屏蔽机制会影响到依赖声明行本身（比如注释里
+提到的 import 文字不该被误判成真实依赖），复用已有的屏蔽函数判断
+"这一行是否真的是代码"，但提取真正的依赖内容时要回到**未屏蔽的原始
+文本**——这是跟符号展示同一条原则的延伸，见
+`references/known_limitations.md`"字符串字面量被静默抹成占位符"一节
+的详细说明，不要在新语言上重新踩一遍这个坑。
+
 ### 复用 `adapter_utils.py` 里的通用工具，不要重复造轮子
 已有的工具函数：
 - `indent_of(line)` — 计算缩进宽度

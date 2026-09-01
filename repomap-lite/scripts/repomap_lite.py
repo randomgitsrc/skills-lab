@@ -42,7 +42,14 @@ from typing import Optional
 # 不依赖 PYTHONPATH 设置（保证脚本可以从任意位置直接运行）。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adapter_base import AdapterResult, Symbol, adapter_says_generated, find_adapter_for  # noqa: E402
+from adapter_base import (  # noqa: E402
+    AdapterResult,
+    Dependency,
+    Symbol,
+    adapter_extract_dependencies,
+    adapter_says_generated,
+    find_adapter_for,
+)
 import adapters  # noqa: F401,E402  # 触发所有适配器的注册
 
 # --------------------------------------------------------------------------
@@ -136,14 +143,18 @@ DEFAULT_INDEX_MAX_ENTRIES = 500
 # --------------------------------------------------------------------------
 
 class FileMap:
-    __slots__ = ("path", "symbols", "skipped_reason", "adapter_name", "notes")
+    __slots__ = ("path", "symbols", "skipped_reason", "adapter_name", "notes", "dependencies")
 
-    def __init__(self, path: str, symbols=None, skipped_reason=None, adapter_name=None, notes=None):
+    def __init__(
+        self, path: str, symbols=None, skipped_reason=None, adapter_name=None, notes=None,
+        dependencies=None,
+    ):
         self.path = path
         self.symbols: list[Symbol] = symbols or []
         self.skipped_reason = skipped_reason
         self.adapter_name = adapter_name
         self.notes: list[str] = notes or []
+        self.dependencies: list[Dependency] = dependencies or []
 
 
 # --------------------------------------------------------------------------
@@ -461,21 +472,106 @@ def build_filemap(path: Path, root: Path, skip_generated: bool = True) -> FileMa
     except Exception as e:  # noqa: BLE001 — 单个适配器出错不应中断整个扫描
         return FileMap(path=rel, skipped_reason=f"adapter-error({adapter.name}: {e})")
 
-    if not result.symbols:
-        return FileMap(path=rel, skipped_reason="no-symbols", adapter_name=adapter.name, notes=result.notes)
+    # 依赖识别是一个独立于符号提取的可选能力，用同一份安全调用包装
+    # （见 adapter_base.adapter_extract_dependencies 的说明），单独 try
+    # 一次而不是让它跟符号提取共享同一个 try 块——即使某个适配器的依赖
+    # 识别逻辑本身出了问题，也不该影响符号提取这个更核心的能力继续正常
+    # 工作（虽然 adapter_extract_dependencies 内部已经吞掉了异常，这里
+    # 再包一层纯粹是防御性的，避免未来有人在调用点之间插入代码时不小心
+    # 引入新的异常路径）。
+    try:
+        dependencies = adapter_extract_dependencies(adapter, lines)
+    except Exception:  # noqa: BLE001
+        dependencies = []
 
-    return FileMap(path=rel, symbols=result.symbols, adapter_name=adapter.name, notes=result.notes)
+    if not result.symbols and not dependencies:
+        # 早期版本这里只看 result.symbols——一个文件如果一个符号都没有
+        # 识别出来就整体跳过，不生成 block。这个判断标准现在不够用了：
+        # 有些文件符号数量确实是0（比如整个文件只有几行 import/require、
+        # 没有任何顶层函数/类定义，或者仅有的函数体是作为参数传入的匿名
+        # 回调，本身不会被现有符号规则收录——用真实项目 express 的
+        # examples/view-constructor/index.js 复现验证过这个场景真实存在），
+        # 但依赖信息仍然是有价值的、不该被一起丢弃的内容。改成"符号和
+        # 依赖都是空的才跳过"，只要两者之一有内容就生成 block。
+        return FileMap(
+            path=rel, skipped_reason="no-symbols", adapter_name=adapter.name, notes=result.notes,
+        )
+
+    return FileMap(
+        path=rel, symbols=result.symbols, adapter_name=adapter.name, notes=result.notes,
+        dependencies=dependencies,
+    )
 
 
 # --------------------------------------------------------------------------
 # 渲染输出（对齐 repomap 参考格式）
 # --------------------------------------------------------------------------
 
+# internal 依赖逐条列出目标路径时的数量上限——超过这个数字就退化成只给
+# 总数，不逐条列出。这是为了避免真的有文件 internal import 了几十个
+# 项目内部模块时，这一行本身变得比展示价值应得的更长；这类极端情况本身
+# 也是一个值得关注的信号（这个文件可能是某种"聚合入口"，import 很多东西
+# 但没有自己的实现），只给数量依然能传达"这个文件跟很多别的文件有关联"
+# 这个事实，只是不逐一列出。
+DEPENDENCY_INTERNAL_DISPLAY_LIMIT = 8
+
+
+def render_dependencies_line(dependencies: list[Dependency]) -> str:
+    """
+    把一个文件的 Dependency 列表压缩成单行展示文本，跟 `<!-- symbols: N -->`
+    同一种注释风格。设计目标是"简单、可用、效率"（用户明确提出的三个词）：
+
+    - **简单**：单行、跟已有的 symbols 注释视觉语言一致，agent 不需要
+      学一套新格式。
+    - **效率**：只有 internal 逐条列出目标路径（这是"文件之间关系"里
+      真正有信息量的部分，也是源码之外查不到的增量信息）；external/
+      unknown/dynamic 只给数量，不逐条展示 raw_text——用真实项目验证过
+      这个必要性：Redis 的 src/server.c 有47条 #include，如果每条都展示
+      完整原始文本，这一份"依赖清单"本身就会占用不小的篇幅，而其中大多数
+      是标准库头文件，对"理解这个项目实际是怎么写的"这个目标价值很低。
+    - **可用**：四种分类的区分度保留（数量分别展示，不合并成一个笼统
+      的总数），点进具体文件源码就能看到 unknown/dynamic 到底是哪几行
+      （Dependency.line_no 保留了这个信息，只是没有在这个压缩视图里
+      展示，需要更细节时可以直接读源文件）。
+
+    没有依赖时返回空字符串（不生成这一行），这是大多数文件的常见情况
+    （不是所有文件都会 import 别的东西），不该为了"格式统一"强行展示
+    一个空的依赖行。
+    """
+    if not dependencies:
+        return ""
+
+    internal = [d for d in dependencies if d.kind == "internal"]
+    external_count = sum(1 for d in dependencies if d.kind == "external")
+    unknown_count = sum(1 for d in dependencies if d.kind == "unknown")
+    dynamic_count = sum(1 for d in dependencies if d.kind == "dynamic")
+
+    parts = []
+    if internal:
+        if len(internal) <= DEPENDENCY_INTERNAL_DISPLAY_LIMIT:
+            targets = ", ".join(d.target for d in internal if d.target)
+            parts.append(f"internal={len(internal)}({targets})")
+        else:
+            parts.append(f"internal={len(internal)}")
+    if external_count:
+        parts.append(f"external={external_count}")
+    if unknown_count:
+        parts.append(f"unknown={unknown_count}")
+    if dynamic_count:
+        parts.append(f"dynamic={dynamic_count}")
+
+    return f"<!-- deps: {' '.join(parts)} -->"
+
+
 def render_filemap(fm: FileMap) -> str:
     if fm.skipped_reason is not None:
         return ""  # 空文件/无符号文件/不支持的文件 一律跳过，不生成 block
 
-    out_lines = [f"{fm.path}:", f"<!-- symbols: {len(fm.symbols)} -->", "⋮"]
+    out_lines = [f"{fm.path}:", f"<!-- symbols: {len(fm.symbols)} -->"]
+    deps_line = render_dependencies_line(fm.dependencies)
+    if deps_line:
+        out_lines.append(deps_line)
+    out_lines.append("⋮")
     for sym in fm.symbols:
         indent = " " * (INDENT_WIDTH * sym.depth)
         # sym.name 通常是单行，但个别适配器（例如 C 系语言里"返回类型独占一行，

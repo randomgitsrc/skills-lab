@@ -28,6 +28,49 @@ class Symbol:
     line_no: int = 0                   # 源文件行号（1-indexed），便于溯源
 
 
+# 依赖的四种归类，跨语言统一使用，不因语言不同而改变这几个值本身：
+#   "internal" — 目标明确，且确定指向同一个项目内部的另一个文件/模块
+#                （相对路径、`mod`、`require_relative` 这类明确"这是我们
+#                自己仓库里的东西"的写法）。这是"文件之间关系"里唯一真正
+#                有信息量的一类——外部包名 agent 通常已经知道或者能查
+#                package.json/go.mod，同项目内部谁依赖谁才是仅从源码本身
+#                看不出来、REPOMAP 能帮上忙的部分。
+#   "external" — 目标明确，且确定指向项目外部的第三方包/系统库（裸包名、
+#                系统头文件等）。只统计出现过哪些、去重展示，不需要标注
+#                每一次具体出现位置，因为"用了 requests 这个库"这个事实
+#                比"用了几次"更重要。
+#   "unknown"  — 目标明确（能拿到具体字符串），但"这是项目内部还是外部
+#                第三方"这件事本身无法仅从这一行代码可靠判断出来。典型
+#                场景：Go 的 `import "goreal/internal/config"`——import
+#                path 本身不含相对/绝对这种直接线索，必须知道 go.mod 里
+#                声明的 module 名字才能判断这是不是内部包，而适配器接口
+#                目前只拿到单文件内容，没有这个跨文件上下文。宁可如实
+#                归为"不确定"，也不要在证据不足时武断分类成 internal 或
+#                external 制造一个可能是错的归类——这是跟"dynamic"同一条
+#                原则的另一种体现，只是"不知道"的是分类本身，不是目标
+#                字符串。
+#   "dynamic"  — 检测到这里存在一次依赖声明，但目标是运行时才能确定的
+#                变量/表达式（不是字符串字面量），正则无法可靠解析出具体
+#                指向谁。**必须如实展示"这里存在但解析不了"，不能因为
+#                解析不出具体目标就完全不提**——这是从字符串展示那次真实
+#                bug 里学到的同一条原则的延伸：宁可展示"这里有信息，但
+#                内容拿不到"，也不要假装没有这处依赖，或者猜一个可能是
+#                错的目标。
+DependencyKind = str  # "internal" | "external" | "unknown" | "dynamic"
+
+
+@dataclass
+class Dependency:
+    """一条从源码里识别出的依赖声明（import/include/require等）。"""
+    raw_text: str           # 原始代码文本（已 strip），比如 `from ..utils import foo`
+    kind: DependencyKind    # "internal" | "external" | "unknown" | "dynamic"
+    line_no: int            # 源文件行号（1-indexed）
+    target: str | None = None  # 能解析出的目标字符串，比如 "../utils"；
+                                # kind="dynamic" 时必为 None（没有可靠目标才归为 dynamic）；
+                                # kind="unknown" 时应该有值（目标本身是清楚的，只是
+                                # internal/external 的归类信息缺失）。
+
+
 @dataclass
 class AdapterResult:
     """一个适配器处理完一个文件后的结果"""
@@ -35,6 +78,9 @@ class AdapterResult:
     # 适配器可以在这里报告"部分支持"的情况，例如 Vue 文件只解析了 <script> 块，
     # 或者某种语法结构遇到了已知不支持的特殊写法。用于诊断，不影响输出格式。
     notes: list[str] = field(default_factory=list)
+    # 这个文件里识别出的依赖声明列表，默认空列表（不实现 extract_dependencies
+    # 的适配器永远拿到空列表，不影响现有行为）。
+    dependencies: list[Dependency] = field(default_factory=list)
 
 
 class LanguageAdapter(Protocol):
@@ -98,6 +144,54 @@ class LanguageAdapter(Protocol):
         """
         ...
 
+    def extract_dependencies(self, lines: list[str]) -> list["Dependency"]:
+        """
+        从文件内容里识别依赖声明（import/include/require/use 等，具体关键字
+        因语言而异）。这是一个**可选**方法，默认实现（见
+        `adapter_says_dependencies`）返回空列表，已有的适配器完全不需要
+        改动就能继续工作。
+
+        为什么不在核心调度层维护一份跨语言的依赖语法列表：跟 `is_generated`
+        同一个理由——"什么样的语法算依赖声明"是语言相关的知识（Python 的
+        `import`、Rust 的 `mod`/`use`、C 的 `#include`，语法、语义都不同），
+        塞进一个全局列表会破坏"新增语言只需要新增一个适配器文件"这条架构
+        承诺。
+
+        设计上要求每个实现遵循的规则（不是建议，是保证输出可信度的底线）：
+        1. **只识别静态、字面量层面就能确定目标的依赖**，正则做不到、也
+           不该尝试做"运行时才能确定指向谁"的解析（比如 JS 的
+           `import(variableExpr)`、C 的 `dlopen(pathBuiltAtRuntime)`）——
+           这类情况必须归为 `kind="dynamic"`、`target=None`，不能瞎猜一个
+           可能是错的目标塞进 `target`。宁可拿到"这里有一处依赖，但内容
+           解析不了"这种不完整但诚实的结果，也不要在检测不到确定答案时
+           要么假装没看到、要么编一个答案——这是本项目在字符串展示那次
+           真实 bug 里得到的教训（见 references/known_limitations.md 里
+           "字符串字面量被静默抹成占位符"一节）在依赖识别这个新功能上的
+           延伸应用：错误的自信比坦诚的"不知道"更危险。
+        2. **区分 internal（项目内部文件）和 external（第三方包/系统库）**，
+           不要混在一起报告成一个笼统的"依赖列表"——这两者对"理解这个
+           项目结构"的价值完全不同：internal 是这份 REPOMAP 能提供的、
+           源码之外查不到的真实增量信息（文件之间怎么互相引用），external
+           往往是一个查 package.json/go.mod/Cargo.toml 就能知道的事实，
+           不需要 REPOMAP 重复劳动。具体判断标准因语言而异（相对路径
+           前缀、`mod` 关键字、`require_relative` 等），由各适配器自己
+           实现，这个方法的调用方不做任何跨语言的统一判断。**如果这一行
+           本身的信息不足以判断是 internal 还是 external**（比如 Go 的
+           `import "goreal/internal/config"`——import path 本身不含
+           相对/绝对这种直接线索，必须知道 go.mod 里的 module 名字才能
+           确定，而这个方法只拿得到单文件内容），归为 `kind="unknown"`，
+           `target` 仍然设成能拿到的目标字符串——不要在证据不足时武断
+           归类，制造一个可能是错的 internal/external 判断。
+        3. 不追求捕获全部可能的依赖写法，只处理该语言里**足够规范、高频、
+           值得投入**的几种主要形式；边界情况/冷门写法宁可漏检也不要
+           为了"覆盖率"牺牲第1条的可靠性底线。
+
+        返回的 Dependency.line_no 是源文件行号（1-indexed），不要求跟
+        extract_symbols 返回的符号有任何对应关系——依赖声明和符号定义
+        是两条独立的信息，只是共享同一份源文件。
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # 适配器注册表
@@ -150,3 +244,21 @@ def adapter_says_generated(adapter: LanguageAdapter, lines: list[str]) -> bool:
         return bool(method(lines))
     except Exception:  # noqa: BLE001 — 单个适配器的可选能力出错不该影响主流程
         return False
+
+
+def adapter_extract_dependencies(adapter: LanguageAdapter, lines: list[str]) -> list["Dependency"]:
+    """
+    安全地调用 adapter.extract_dependencies(lines)，兼容"这个适配器没实现
+    这个可选方法"的情况——没实现就返回空列表，不影响任何现有行为；实现了
+    但运行时抛异常，同样吞掉异常返回空列表，不能因为依赖分析这个新增能力
+    出错就拖垮整个符号提取流程（这是一个锦上添花的能力，不该有能力让它
+    变成单点故障）。
+    """
+    method = getattr(adapter, "extract_dependencies", None)
+    if method is None:
+        return []
+    try:
+        result = method(lines)
+        return list(result) if result else []
+    except Exception:  # noqa: BLE001 — 单个适配器的可选能力出错不该影响主流程
+        return []

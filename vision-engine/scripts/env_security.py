@@ -9,6 +9,17 @@ from pathlib import Path
 
 
 def _parse_env_file(path: Path) -> dict:
+    """解析 .env 文件为 {KEY: value}。
+
+    兼容两类常见写法（不同工具写 .env 的习惯不同）：
+    - 纯 `KEY=value`
+    - shell 风格 `export KEY=value` / `export  KEY=value`（export 后可有多个空白）
+
+    其余规则：`#` 开头的注释行、空行、无 `=` 的行跳过；值两侧的
+    引号（`"` / `'`）剥离。不处理行内注释（`KEY=value # note` 会
+    把 `# note` 保留在值里——与 shell 语义不一致，但保持原行为，
+    避免误伤值里本就要出现的 `#`，如 URL 片段）。
+    """
     env = {}
     if not path.is_file():
         return env
@@ -16,6 +27,10 @@ def _parse_env_file(path: Path) -> dict:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # 支持 shell 风格 export 前缀：export KEY=value（export 后需空白，
+        # 避免把 KEY 名本身以 export 开头的行（如 exportX=1）误判成 export）
+        if line.startswith("export") and line[6:7] in ("", " ", "\t"):
+            line = line[6:].lstrip()
         k, v = line.split("=", 1)
         env[k.strip()] = v.strip().strip('"').strip("'")
     return env

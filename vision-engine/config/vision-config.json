@@ -754,7 +754,8 @@
           "timeout": 300,
           "max_tokens": 4096,
           "alias": "daily-vision",
-          "_note": "xrouter 代理商（router.gsis.top）· 实测结论(2026-09-06)：general/ocr/grounding/ui-grounding 四标签全部实测通过（9个role全过：quick/comprehensive/ocr/code/compare/locate/locate-ui/promptify；locate IoU=1.0；OCR 26条HN标题全对）；⚠️ 偶发服务端 524（网关超时，复杂图/长输出更易触发，重试即过），preferred_models 已放首位，fallback 兜底不受影响",
+          "stream": true,
+          "_note": "xrouter 自营链路（CF 边缘→cloudflared→Bifrost→gemma-4-31b-it）· 实测(2026-09-06)：四标签全过（9 role 全过，locate IoU=1.0，OCR 26 条标题零错）。⚠️ 根因更正：此前 524 是 Cloudflare 边缘 100s 源站超时，非上游波动；已改 stream:true（SSE）根治——流式首字节秒级到达，>100s 长任务不再被掐线（A/B 实测：非流式 524 / 流式 200 且 101s 完整返回）。⚠️ max_tokens 勿给小值（gemma thinking=True 会吃光预算致 200+空 content）。",
           "quotas": [
             {
               "metric": "requests",

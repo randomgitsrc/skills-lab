@@ -3,12 +3,14 @@
   "capability_provider_whitelist": {
     "grounding": [
       "google",
-      "alibailian"
+      "alibailian",
+      "xrouter"
     ],
     "ui-grounding": [
       "alibailian",
       "google",
-      "google-free"
+      "google-free",
+      "xrouter"
     ]
   },
   "roles": {
@@ -20,10 +22,11 @@
       "output_schema": "text",
       "skip_context": true,
       "preferred_models": [
+        "daily-vision",
+        "qwen-vl-flash",
         "gemini-flash-lite-free",
         "gemini-flash-lite-free-35",
         "qwen-flash",
-        "qwen-vl-flash",
         "gemini-flash-lite"
       ],
       "_note": "免费浮动 lite 打头（0 成本），免费 pin 兜底，再廉价付费溢出"
@@ -37,10 +40,11 @@
       "default": true,
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
-        "gemini-flash",
+        "daily-vision",
         "qwen-max",
-        "gemini-pro",
         "qwen-vl",
+        "gemini-flash",
+        "gemini-pro",
         "doubao-lite"
       ]
     },
@@ -52,9 +56,10 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/ocr.md",
       "preferred_models": [
+        "daily-vision",
+        "qwen-vl",
         "gemini-pro",
         "gemini-flash",
-        "qwen-vl",
         "qwen-vl-235b",
         "doubao-lite"
       ],
@@ -68,9 +73,10 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/code.md",
       "preferred_models": [
+        "daily-vision",
+        "qwen-max",
         "gemini-flash",
         "qwen-plus",
-        "qwen-max",
         "gemini-pro"
       ]
     },
@@ -83,6 +89,7 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/compare.md",
       "preferred_models": [
+        "daily-vision",
         "gemini-pro",
         "gemini-flash",
         "qwen-max",
@@ -98,6 +105,7 @@
       "query_mode": "targeted",
       "system_prompt_file": "prompts/locate.md",
       "preferred_models": [
+        "daily-vision",
         "gemini-pro",
         "qwen-vl",
         "qwen-vl-235b"
@@ -113,6 +121,7 @@
       "query_mode": "enumerate_then_filter",
       "system_prompt_file": "prompts/locate-ui.md",
       "preferred_models": [
+        "daily-vision",
         "qwen-vl",
         "gemini-flash",
         "qwen-vl-flash"
@@ -127,6 +136,7 @@
       "output_schema": "text",
       "max_tokens": 8192,
       "preferred_models": [
+        "daily-vision",
         "gemini-flash",
         "gemini-pro",
         "qwen-max",
@@ -721,6 +731,36 @@
               "window_seconds": 60,
               "limit": 100,
               "_note": "保守值，官方 30K RPM（控制台为准）"
+            }
+          ]
+        }
+      ]
+    },
+    "xrouter": {
+      "base_url": "https://router.gsis.top/v1",
+      "api_format": "openai",
+      "api_key_env": "XROUTER_VISION_API_KEY",
+      "models": [
+        {
+          "name": "daily-vision",
+          "capabilities": [
+            "general",
+            "ocr",
+            "grounding",
+            "ui-grounding"
+          ],
+          "coordinate_convention": "gemini_1000",
+          "priority": 1,
+          "timeout": 300,
+          "max_tokens": 4096,
+          "alias": "daily-vision",
+          "_note": "xrouter 代理商（router.gsis.top）· 实测结论(2026-09-06)：general/ocr/grounding/ui-grounding 四标签全部实测通过（9个role全过：quick/comprehensive/ocr/code/compare/locate/locate-ui/promptify；locate IoU=1.0；OCR 26条HN标题全对）；⚠️ 偶发服务端 524（网关超时，复杂图/长输出更易触发，重试即过），preferred_models 已放首位，fallback 兜底不受影响",
+          "quotas": [
+            {
+              "metric": "requests",
+              "window_seconds": 60,
+              "limit": 60,
+              "_note": "保守默认值，待实测"
             }
           ]
         }

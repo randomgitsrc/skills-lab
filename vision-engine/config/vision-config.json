@@ -40,12 +40,12 @@
       "default": true,
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
-        "daily-vision",
         "qwen-max",
         "qwen-vl",
         "gemini-flash",
         "gemini-pro",
-        "doubao-lite"
+        "doubao-lite",
+        "daily-vision"
       ]
     },
     "ocr": {
@@ -56,12 +56,12 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/ocr.md",
       "preferred_models": [
-        "daily-vision",
         "qwen-vl",
         "gemini-pro",
         "gemini-flash",
         "qwen-vl-235b",
-        "doubao-lite"
+        "doubao-lite",
+        "daily-vision"
       ],
       "_note": "Gemini 原生 OCR 优先，qwen-vl 覆盖中文密集文本"
     },
@@ -73,11 +73,11 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/code.md",
       "preferred_models": [
-        "daily-vision",
         "qwen-max",
         "gemini-flash",
         "qwen-plus",
-        "gemini-pro"
+        "gemini-pro",
+        "daily-vision"
       ]
     },
     "compare": {
@@ -89,11 +89,11 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/compare.md",
       "preferred_models": [
-        "daily-vision",
         "gemini-pro",
         "gemini-flash",
         "qwen-max",
-        "qwen-vl"
+        "qwen-vl",
+        "daily-vision"
       ]
     },
     "locate": {
@@ -136,11 +136,11 @@
       "output_schema": "text",
       "max_tokens": 8192,
       "preferred_models": [
-        "daily-vision",
         "gemini-flash",
         "gemini-pro",
         "qwen-max",
-        "qwen-vl"
+        "qwen-vl",
+        "daily-vision"
       ],
       "_note": "逆向提示词工程，max_tokens=8192 确保长 prompt 不被截断"
     }
@@ -755,7 +755,7 @@
           "max_tokens": 4096,
           "alias": "daily-vision",
           "stream": true,
-          "_note": "xrouter 自营链路（CF 边缘→cloudflared→Bifrost→gemma-4-31b-it）· 实测(2026-09-06)：四标签全过（9 role 全过，locate IoU=1.0，OCR 26 条标题零错）。⚠️ 根因更正：此前 524 是 Cloudflare 边缘 100s 源站超时，非上游波动；已改 stream:true（SSE）根治——流式首字节秒级到达，>100s 长任务不再被掐线（A/B 实测：非流式 524 / 流式 200 且 101s 完整返回）。⚠️ max_tokens 勿给小值（gemma thinking=True 会吃光预算致 200+空 content）。",
+          "_note": "xrouter 自营链路（CF 边缘→cloudflared→Bifrost→gemma-4-31b-it）· 实测(2026-09-06)：四标签全过（9 role 全过，locate IoU=1.0，OCR 26 条标题零错）。⚠️ 524 根因：CF 边缘 100s 源站超时，非上游波动；已改 stream:true（SSE）——流式首字节秒级到达，>100s 任务不再必死（实测 148s 成功）。⚠️ 但重型（长输出）任务流式下仍偶发 524（失败集中在 126-128s，疑似上游 thinking 阶段不即时 flush 响应头）：故 quick/locate/locate-ui 放首位，comprehensive/ocr/code/compare/promptify 移末尾兜底。⚠️ max_tokens 勿给小值（gemma thinking 会吃光预算致 200+空 content）。",
           "quotas": [
             {
               "metric": "requests",

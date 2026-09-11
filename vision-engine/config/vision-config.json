@@ -22,7 +22,7 @@
       "output_schema": "text",
       "skip_context": true,
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "qwen-vl-flash",
         "gemini-flash-lite-free",
         "gemini-flash-lite-free-35",
@@ -40,7 +40,7 @@
       "default": true,
       "system_prompt_file": "prompts/comprehensive.md",
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "qwen-max",
         "qwen-vl",
         "gemini-flash",
@@ -56,7 +56,7 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/ocr.md",
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "qwen-vl",
         "gemini-pro",
         "gemini-flash",
@@ -73,7 +73,7 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/code.md",
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "qwen-max",
         "gemini-flash",
         "qwen-plus",
@@ -89,7 +89,7 @@
       "output_schema": "text",
       "system_prompt_file": "prompts/compare.md",
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "gemini-pro",
         "gemini-flash",
         "qwen-max",
@@ -105,7 +105,7 @@
       "query_mode": "targeted",
       "system_prompt_file": "prompts/locate.md",
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "gemini-pro",
         "qwen-vl",
         "qwen-vl-235b"
@@ -121,7 +121,7 @@
       "query_mode": "enumerate_then_filter",
       "system_prompt_file": "prompts/locate-ui.md",
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "qwen-vl",
         "gemini-flash",
         "qwen-vl-flash"
@@ -136,7 +136,7 @@
       "output_schema": "text",
       "max_tokens": 8192,
       "preferred_models": [
-        "daily-vision",
+        "nx-vision",
         "gemini-flash",
         "gemini-pro",
         "qwen-max",
@@ -742,7 +742,7 @@
       "api_key_env": "XROUTER_VISION_API_KEY",
       "models": [
         {
-          "name": "daily-vision",
+          "name": "nx-vision",
           "capabilities": [
             "general",
             "ocr",
@@ -753,7 +753,7 @@
           "priority": 1,
           "timeout": 300,
           "max_tokens": 4096,
-          "alias": "daily-vision",
+          "alias": "nx-vision",
           "stream": true,
           "_note": "xrouter 自营链路（CF 边缘→cloudflared→Bifrost→gemma-4-31b-it）· 实测(2026-09-06)：四标签全过（9 role 全过，locate IoU=1.0，OCR 26 条标题零错）。⚠️ 524 根因：CF 边缘 100s 源站超时，非上游波动；已改 stream:true（SSE）流式。⚠️ 后台已优化（服务端侧调整，2026-09-06 午后）；恢复全部 role 首位，稳定性复测中。⚠️ max_tokens 勿给小值（gemma thinking 会吃光预算致 200+空 content）。",
           "quotas": [

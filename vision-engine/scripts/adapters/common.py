@@ -1,6 +1,7 @@
 """公共工具：图片编码、mimetype 推断、HTTP 请求封装、endpoint 不可达缓存。"""
 import base64
 import mimetypes
+import os
 import time
 from pathlib import Path
 
@@ -86,6 +87,50 @@ def make_timeout(model_cfg: dict) -> httpx.Timeout:
     total = model_cfg.get("timeout", 60)
     connect = model_cfg.get("connect_timeout", DEFAULT_CONNECT_TIMEOUT)
     return httpx.Timeout(timeout=total, connect=connect)
+
+
+# NO_PROXY 里出现 `[::1]`（带方括号的 IPv6 字面量）会让 httpx 0.28 在创建
+# Client 时把该条目当 URL 解析并崩溃（Invalid port: ':1]'）。
+# 背景：DSH 的 http-proxy 策略（policy.ts LOOPBACK_NO_PROXY）会把
+# ['localhost', '127.0.0.1', '::1', '[::1]'] 合并进 NO_PROXY——其中
+# `[::1]` 是为了兼容 Node/undici 的匹配器（它读裸 `::1` 会解析成 host ':' port '1'），
+# 但 httpx 自己已把裸 `::1` 正确处理为 IPv6 豁免（all://[::1]），多出来的
+# `[::1]` 反而炸解析。这里在创建 Client 的瞬间剔除该条目，用毕恢复，
+# 不污染进程其余部分的 env 视图。
+_IPV6_BRACKETED_NO_PROXY = "[::1]"
+
+
+def make_client(model_cfg: dict | None = None, *, timeout: httpx.Timeout | None = None) -> httpx.Client:
+    """创建 httpx.Client，防御 NO_PROXY 中的 `[::1]` 条目导致 Client 构造崩溃。
+
+    - model_cfg 提供时按 make_timeout(model_cfg) 建超时（adapter 常规路径）
+    - 也可直接传 timeout（如 omniparser health_check 用短超时探活）
+    - 仅临时修改环境变量（剔除 `[::1]`，保留裸 `::1`），Client 创建后立即恢复。
+      vision-engine 是单线程顺序调用，无并发竞争；若未来引入并发请求，
+      需改为在 fork 前一次性 sanitize env 或显式构建 proxy map。
+    """
+    timeout = timeout or make_timeout(model_cfg or {})
+    saved: dict[str, str | None] = {}
+    try:
+        for name in ("NO_PROXY", "no_proxy"):
+            val = os.environ.get(name)
+            if val and _IPV6_BRACKETED_NO_PROXY in val.split(","):
+                saved[name] = val
+                cleaned = ",".join(
+                    part for part in val.split(",")
+                    if part.strip() != _IPV6_BRACKETED_NO_PROXY
+                )
+                if cleaned:
+                    os.environ[name] = cleaned
+                else:
+                    os.environ.pop(name, None)
+        return httpx.Client(timeout=timeout)
+    finally:
+        for name, val in saved.items():
+            if val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = val
 
 
 _ENDPOINT_UNREACHABLE: dict[str, float] = {}

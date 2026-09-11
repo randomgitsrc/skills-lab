@@ -4,15 +4,14 @@
 本地过滤（enumerate_then_filter）逻辑不在这里，在主脚本 locate_ui.py 里做，
 这个模块只负责"调用服务、拿到结构化元素列表"这一层。
 """
-import httpx
 
-from .common import encode_image, classify_http_error, AdapterHTTPError, make_timeout
+from .common import encode_image, classify_http_error, AdapterHTTPError, make_client, make_timeout
 
 
 def health_check(base_url: str, timeout: float = 3.0) -> bool:
     """调用前置健康检查（§13风险表：locate-ui无fallback，服务不可用要尽早明确失败）。"""
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with make_client(timeout=timeout) as client:
             r = client.get(f"{base_url.rstrip('/')}/health")
             return r.status_code == 200
     except Exception:
@@ -29,7 +28,7 @@ def detect(model_cfg: dict, image_path: str) -> list[dict]:
     b64, media_type = encode_image(image_path)
 
     try:
-        with httpx.Client(timeout=make_timeout(model_cfg)) as client:
+        with make_client(model_cfg) as client:
             r = client.post(f"{base}/parse", json={"image_base64": b64, "media_type": media_type})
             r.raise_for_status()
             data = r.json()

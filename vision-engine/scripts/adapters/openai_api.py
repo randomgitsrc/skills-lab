@@ -9,9 +9,8 @@
 """
 import json
 
-import httpx
 
-from .common import encode_image, classify_http_error, AdapterHTTPError, make_timeout
+from .common import encode_image, classify_http_error, AdapterHTTPError, make_client, make_timeout
 from .usage import parse_usage
 
 
@@ -44,7 +43,7 @@ def call(model_cfg: dict, api_key: str, system_prompt: str | None,
 def _call_once(model_cfg: dict, base: str, headers: dict, body: dict) -> dict:
     """非流式：一次 POST 等完整响应。"""
     try:
-        with httpx.Client(timeout=make_timeout(model_cfg)) as client:
+        with make_client(model_cfg) as client:
             r = client.post(f"{base}/chat/completions", headers=headers, json=body)
             r.raise_for_status()
             data = r.json()
@@ -109,7 +108,7 @@ def _call_stream(model_cfg: dict, base: str, headers: dict, body: dict) -> dict:
     status_code: int | None = None
 
     try:
-        with httpx.Client(timeout=make_timeout(model_cfg)) as client:
+        with make_client(model_cfg) as client:
             with client.stream("POST", f"{base}/chat/completions", headers=headers, json=stream_body) as r:
                 # 状态码错误在进入 body 前就能确定，直接抛
                 status_code = r.status_code
